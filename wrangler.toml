@@ -1,0 +1,16 @@
+name = "temp-mail-bot"
+main = "_worker.js"
+compatibility_date = "2024-01-01"
+
+# D1 Database Binding for sessions, email bindings, inbox, and per-chat state
+[[d1_databases]]
+binding = "DB"
+database_name = "tempmail-db"
+database_id = "5ef2bdbb-d644-426a-b915-f20e81b7b390"
+
+# Environment Variables
+[vars]
+BOT_TOKEN = "YOUR_TELEGRAM_BOT_TOKEN" # Replace with your Telegram Bot Token from @BotFather
+TELEGRAM_USER_ID = ""                # Optional: legacy single-admin gate. Leave empty to allow every chat_id when MULTI_USER is off.
+MULTI_USER = "true"                  # Set to "true" to open the bot to every Telegram user (each chat keeps its own session, inbox, and 50-token archive). Set to "false" to fall back to the TELEGRAM_USER_ID gate.
+DOMAIN = "yourdomain.com"             # Replace with your custom domain configured in Cloudflare Email Routing

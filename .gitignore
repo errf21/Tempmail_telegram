@@ -1,0 +1,97 @@
+# Dependencies
+node_modules/
+.pnp/
+.pnp.js
+
+# Build / bundler output
+dist/
+build/
+out/
+.wrangler/
+.miniflare/
+.next/
+.nuxt/
+.vite/
+.parcel-cache/
+*.tsbuildinfo
+
+# Wrangler / Cloudflare
+.wrangler/
+.dev.vars
+.wrangler-logs/
+*.log
+wrangler-logs/
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+.env.local
+.env.*.local
+*.pem
+*.key
+*.crt
+secrets/
+.secrets/
+
+# Editor / OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.directory
+
+# Local temporary fixtures / debug worker snapshots
+.worker_*.mjs
+.worker_*.js
+*.tmp
+*.bak
+*.swp
+tests/fixtures/
+tests/.fixtures/
+tests/tmp/
+
+# Large / one-off build artifacts
+*.zip
+*.tar.gz
+*.tgz
+opencode-*.zip
+opencode-*.deb
+*.so
+opencode
+opencode.bin
+senpaiscanner
+libc++_shared.so
+libopentui.so
+libtagfix.so
+
+# Scraper / scanner reports and dumps
+SenPaiScannerResult-*.txt
+result.csv
+results.txt
+best_mtproto_*.txt
+scan_checkpoint.json
+metadata.json
+EMAIL_DIAG.md
+cloudfalare-domains.txt
+
+# Storage symlinks (termux-only)
+storage/dcim
+storage/downloads
+storage/movies
+storage/music
+storage/pictures
+storage/shared
+termux-files
