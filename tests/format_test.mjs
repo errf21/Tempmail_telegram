@@ -234,8 +234,7 @@ check("reported-style: smart-quote is preserved as U+2019",
 check("reported-style: full word \"wasn\" appears (not \"wasn=E2\")",
   /wasn[’']t/.test(fReported.previewText));
 
-// 3c) Link + code case: with the OTP-wins policy, the labelled code
-//     is extracted and the link is intentionally ignored. We still
+// 3c) Link + code case: Stage 2 extracts BOTH independently. We still
 //     assert the preview is QP-clean and that the link's ?token=abc
 //     survives in the preview text (even if it isn't promoted to
 //     activationLink).
@@ -244,8 +243,10 @@ const f2 = mod.extractFast(buildQpEmail(linkAndCode, {
   from: "OpenAI <noreply@openai.com>",
   subject: "Verify your account"
 }));
-check("fast+qp+link: labelled code wins, link ignored",
-  f2.otpCode === "987654" && f2.activationLink === "");
+check("fast+qp+link: labelled code wins",
+  f2.otpCode === "987654");
+check("fast+qp+link: verify link ALSO extracted (Stage 2 both-shown)",
+  f2.activationLink === "https://example.com/verify?token=abc123");
 check("fast+qp+link: preview does not contain QP artifacts",
   !f2.previewText.includes("=20") && !f2.previewText.includes("=3D") && !f2.previewText.includes("=E2"));
 // The link may be truncated by the 200-char preview cap, but the QP

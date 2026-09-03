@@ -44,8 +44,11 @@ export {
   extractFast,
   parseEmailBody,
   isStrictVerificationUrl,
+  scoreVerificationUrl,
   VERIFY_PATH_KEYWORDS,
   VERIFY_QUERY_KEYWORDS,
+  VERIFY_QUERY_STRONG,
+  VERIFY_QUERY_WEAK,
   ACTIVATION_CONTEXT_KEYWORDS,
   MAX_PARSE_BYTES
 };
@@ -271,7 +274,7 @@ const openAiOtpBody =
 const openAiOtpFast = mod.extractFast(openAiOtpBody);
 check("extractFast[openai-otp]: extracts OTP",
   openAiOtpFast.otpCode === "123456");
-check("extractFast[openai-otp]: does NOT extract the help URL (OTP-wins)",
+check("extractFast[openai-otp]: help/footer URL NOT promoted (no verify signal)",
   openAiOtpFast.activationLink === "");
 
 // ---------------------------------------------------------------------------
@@ -289,6 +292,57 @@ check("parseEmailBody[aparat-no-kw]: body shows the Persian button text",
 const xConfirmParsed = mod.parseEmailBody(xConfirmBody);
 check("parseEmailBody[x-confirm]: links list contains the URL",
   Array.isArray(xConfirmParsed.links) && xConfirmParsed.links.includes(xConfirmUrl));
+
+// ===========================================================================
+// 8. Stage 2 — structural query classification, coexistence, best-selection
+// ===========================================================================
+
+// 8a) Structural param matching: weak/single-letter params never qualify.
+check("S2[classifier]: ?id= alone does NOT qualify (weak)",
+  mod.isStrictVerificationUrl("https://example.com/page?id=12345", "") === false);
+check("S2[classifier]: ?u= single-letter param dropped entirely",
+  mod.isStrictVerificationUrl("https://example.com/page?u=abc", "") === false);
+check("S2[classifier]: ?utm_source= alone does NOT qualify",
+  mod.isStrictVerificationUrl("https://example.com/page?utm_source=newsletter", "") === false);
+check("S2[classifier]: ?token= qualifies (structural, strong)",
+  mod.isStrictVerificationUrl("https://example.com/page?token=abc", "") === true);
+check("S2[classifier]: weak param corroborated by activation context qualifies",
+  mod.isStrictVerificationUrl("https://example.com/page?id=123", "تکمیل ثبت نام") === true);
+check("S2[classifier]: unsubscribe URL rejected even with token",
+  mod.isStrictVerificationUrl("https://example.com/u/unsubscribe?token=abc", "verify") === false);
+check("S2[classifier]: real verify link with utm tracking params still accepted",
+  mod.isStrictVerificationUrl("https://example.com/verify?token=abc&utm_source=email", "") === true);
+
+// 8b) Ranking: utm_-bearing URL ranks BELOW the same URL without utm.
+check("S2[rank]: utm demotes score",
+  mod.scoreVerificationUrl("https://example.com/verify?token=abc", "").score <
+  mod.scoreVerificationUrl("https://example.com/verify?token=abc&utm_source=email", "") === false &&
+  mod.scoreVerificationUrl("https://example.com/verify?token=abc", "").score >
+  mod.scoreVerificationUrl("https://example.com/verify?token=abc&utm_source=email", "").score);
+
+// 8c) Coexistence: code + verify link → BOTH returned.
+const s2both = mod.extractFast(
+  "From: x@y\r\nTo: u@v\r\nSubject: s\r\nContent-Type: text/html\r\n\r\n" +
+  "<p>Your code: <b>654321</b></p><p>Verify: <a href=\"https://example.com/verify?token=abc\">Confirm account</a></p>");
+check("S2[fast]: OTP and link coexist (both-shown policy)",
+  s2both.otpCode === "654321" &&
+  s2both.activationLink === "https://example.com/verify?token=abc");
+check("S2[fast]: activationLinks contains only qualified URLs (best-first)",
+  Array.isArray(s2both.activationLinks) &&
+  s2both.activationLinks.length === 1 &&
+  s2both.activationLinks[0] === "https://example.com/verify?token=abc");
+
+// 8d) Best-selection: a tracking/marketing URL appearing EARLIER in the
+//     body must not steal the primary slot from the real verify link.
+const s2order = mod.extractFast(
+  "From: x@y\r\nTo: u@v\r\nSubject: s\r\nContent-Type: text/html\r\n\r\n" +
+  "<p>Special offer! <a href=\"https://promos.example.com/deal?id=77\">50% off</a></p>" +
+  "<p>Confirm your account: <a href=\"https://example.com/auth/confirm?token=xyz\">تایید حساب</a></p>");
+check("S2[fast]: best URL wins even when a tracking URL appears first",
+  s2order.activationLink === "https://example.com/auth/confirm?token=xyz");
+check("S2[fast]: tracking URL excluded from activationLinks",
+  Array.isArray(s2order.activationLinks) &&
+  !s2order.activationLinks.includes("https://promos.example.com/deal?id=77"));
 
 console.log(failures === 0 ? "\nALL LINK-EXTRACTION TESTS PASSED" : `\n${failures} LINK-EXTRACTION TEST(S) FAILED`);
 process.exit(failures === 0 ? 0 : 1);

@@ -52,7 +52,7 @@ const workerSrc = readFileSync(join(root, "_worker.js"), "utf8");
 // Re-export renderFullEmail (in addition to the helpers already exposed
 // by the other test harnesses) so this test can drive the view path.
 const harness = `
-export { renderFullEmail, parseEmailBody, extractFast, MAX_PARSE_BYTES, buildEmailNotificationText, i18n, linkLabelFor };
+export { renderFullEmail, parseEmailBody, extractFast, MAX_PARSE_BYTES, buildEmailNotificationText, i18n, linkLabelFor, sendTelegramMessage, editTelegramMessage };
 `;
 const tmp = join(root, ".worker_view_test.mjs");
 writeFileSync(tmp, workerSrc + harness);
@@ -142,8 +142,8 @@ const fast = mod.extractFast(openAiRaw);
 const tFast1 = process.hrtime.bigint();
 const fastMs = Number(tFast1 - tFast0) / 1e6;
 check("fast path: extractFast runs in <50 ms (" + fastMs.toFixed(1) + " ms)", fastMs < 50);
-check("fast path: extractFast prioritises the labelled code (OTP-wins policy)",
-  fast.otpCode === "987654" && fast.activationLink === "");
+check("fast path: extractFast extracts the labelled code AND the verify link (Stage 2 both-shown)",
+  fast.otpCode === "987654" && fast.activationLink === verifyLink);
 check("fast path: preview is truncated to <= 201 chars", fast.previewText.length <= 201);
 
 // 1b) parseEmailBody() — the heavy path. This is what renderFullEmail()
@@ -222,22 +222,24 @@ check("renderFullEmail: link is rendered as an inline anchor (host/path as visib
 check("renderFullEmail: body is well over the 200-char preview length (" + outText.length + ")", outText.length > fast.previewText.length);
 check("renderFullEmail: keeps the sender line", outText.includes("OpenAI"));
 check("renderFullEmail: keeps the subject line", outText.includes("Your OpenAI verification code"));
-check("renderFullEmail: keyboard has Collapse, Back and Home buttons (3 rows)",
+// Stage 2: the fixture's raw contains a verify link, so the keyboard now
+// leads with the URL button (4 rows: URL, Collapse, Back, Home).
+check("renderFullEmail: keyboard has URL, Collapse, Back and Home buttons (4 rows)",
   lastTgPayload && lastTgPayload.reply_markup && Array.isArray(lastTgPayload.reply_markup.inline_keyboard) &&
-  lastTgPayload.reply_markup.inline_keyboard.length === 3);
-check("renderFullEmail: first row is the Collapse button with collapse_<id>",
+  lastTgPayload.reply_markup.inline_keyboard.length === 4);
+check("renderFullEmail: second row is the Collapse button with collapse_<id>",
   lastTgPayload && lastTgPayload.reply_markup &&
-  lastTgPayload.reply_markup.inline_keyboard[0] &&
-  lastTgPayload.reply_markup.inline_keyboard[0][0] &&
-  lastTgPayload.reply_markup.inline_keyboard[0][0].callback_data === "collapse_" + inboxItem.id);
-check("renderFullEmail: second row is the Back button",
   lastTgPayload.reply_markup.inline_keyboard[1] &&
   lastTgPayload.reply_markup.inline_keyboard[1][0] &&
-  lastTgPayload.reply_markup.inline_keyboard[1][0].callback_data === "inbox");
-check("renderFullEmail: third row is the Home button",
+  lastTgPayload.reply_markup.inline_keyboard[1][0].callback_data === "collapse_" + inboxItem.id);
+check("renderFullEmail: third row is the Back button",
   lastTgPayload.reply_markup.inline_keyboard[2] &&
   lastTgPayload.reply_markup.inline_keyboard[2][0] &&
-  lastTgPayload.reply_markup.inline_keyboard[2][0].callback_data === "back_dashboard");
+  lastTgPayload.reply_markup.inline_keyboard[2][0].callback_data === "inbox");
+check("renderFullEmail: fourth row is the Home button",
+  lastTgPayload.reply_markup.inline_keyboard[3] &&
+  lastTgPayload.reply_markup.inline_keyboard[3][0] &&
+  lastTgPayload.reply_markup.inline_keyboard[3][0].callback_data === "back_dashboard");
 
 // ---------------------------------------------------------------------------
 // 3. Telegram 4096-char cap. If the parsed body is huge we must truncate
@@ -810,6 +812,102 @@ check("Aparat regression: short alert keyboard first row is a Telegram 'url' but
   shortRows[0] && shortRows[0][0] && shortRows[0][0].url === aparatUrl);
 check("Aparat regression: short alert URL button text is '✅ تایید حساب'",
   shortRows[0] && shortRows[0][0] && shortRows[0][0].text === "✅ تایید حساب");
+
+// ---------------------------------------------------------------------------
+// Stage 1 regression: Telegram API helpers must THROW on HTTP/API errors.
+// Before the fix, sendTelegramMessage()/editTelegramMessage() returned
+// Telegram's error JSON silently, so the email() handler's catch/fallback
+// could never fire and failed notifications were lost without a trace.
+// ---------------------------------------------------------------------------
+
+// 1. HTTP 400 + Telegram ok:false => both helpers must throw, with the
+//    Telegram error description in the message.
+{
+  const realFetch2 = globalThis.fetch;
+  globalThis.fetch = async () => new Response(
+    JSON.stringify({ ok: false, error_code: 400, description: "Bad Request: test-stage1" }),
+    { status: 400, headers: { "Content-Type": "application/json" } }
+  );
+  try {
+    let sendErr = null;
+    let editErr = null;
+    try { await mod.sendTelegramMessage("stub", 1, "x"); } catch (e) { sendErr = e; }
+    try { await mod.editTelegramMessage("stub", 1, 2, "x"); } catch (e) { editErr = e; }
+    check("Stage1: sendTelegramMessage throws on HTTP 400 / ok:false",
+      sendErr instanceof Error && sendErr.message.includes("Bad Request: test-stage1"));
+    check("Stage1: editTelegramMessage throws on HTTP 400 / ok:false",
+      editErr instanceof Error && editErr.message.includes("Bad Request: test-stage1"));
+  } finally {
+    globalThis.fetch = realFetch2;
+  }
+}
+
+// 2. Benign Telegram 400 "message is not modified": editTelegramMessage
+//    must resolve (no throw), sendTelegramMessage must still throw.
+{
+  const realFetch2 = globalThis.fetch;
+  globalThis.fetch = async () => new Response(
+    JSON.stringify({ ok: false, error_code: 400, description: "Bad Request: message is not modified" }),
+    { status: 400, headers: { "Content-Type": "application/json" } }
+  );
+  try {
+    let editThrew = false;
+    let sendThrew = false;
+    try { await mod.editTelegramMessage("stub", 1, 2, "x"); } catch (e) { editThrew = true; }
+    try { await mod.sendTelegramMessage("stub", 1, "x"); } catch (e) { sendThrew = true; }
+    check("Stage1: editTelegramMessage treats 'message is not modified' as success",
+      editThrew === false);
+    check("Stage1: sendTelegramMessage still throws on 'message is not modified' (no edit exception)",
+      sendThrew === true);
+  } finally {
+    globalThis.fetch = realFetch2;
+  }
+}
+
+// 3. HTTP 200 + ok:true => success path still returns the parsed JSON.
+{
+  const realFetch2 = globalThis.fetch;
+  globalThis.fetch = async () => new Response(
+    JSON.stringify({ ok: true, result: { message_id: 7 } }),
+    { status: 200, headers: { "Content-Type": "application/json" } }
+  );
+  try {
+    const sent = await mod.sendTelegramMessage("stub", 1, "x");
+    check("Stage1: sendTelegramMessage returns parsed JSON on success",
+      sent && sent.ok === true && sent.result && sent.result.message_id === 7);
+  } finally {
+    globalThis.fetch = realFetch2;
+  }
+}
+
+// 4. Stage 1 FIX 2: the actionHtml link in renderFullEmail must be a plain
+//    inline anchor — <a> must NEVER be wrapped in <code> (Telegram renders
+//    that as a copy-menu code block, not a clickable link).
+{
+  let actionLinkText = null;
+  const realFetch2 = globalThis.fetch;
+  globalThis.fetch = async (url, opts) => {
+    const payload = JSON.parse(opts.body);
+    actionLinkText = payload.text;
+    return { ok: true, status: 200, text: async () => '{"ok":true}', json: async () => ({ ok: true }) };
+  };
+  try {
+    const stage1Item = {
+      id: "stage1-anchor", ts: Date.now(),
+      from: "Example <noreply@example.com>", subject: "Verify your email",
+      body: "", links: [], date: "now",
+      raw: "From: noreply@example.com\r\nSubject: Verify your email\r\n\r\nVerify at https://example.com/verify?token=abc123",
+      otpCode: "", activationLink: "https://example.com/verify?token=abc123"
+    };
+    await mod.renderFullEmail("123456789", 43, stage1Item, { BOT_TOKEN: "stub-token" }, "fa");
+    check("Stage1: actionHtml anchor is NOT wrapped in <code>",
+      actionLinkText !== null &&
+      /<a href="https:\/\/example\.com\/verify\?token=abc123"/.test(actionLinkText) &&
+      !/<code>[^<]*<a\s+href="https:\/\/example\.com\/verify\?token=abc123"/.test(actionLinkText));
+  } finally {
+    globalThis.fetch = realFetch2;
+  }
+}
 
 console.log(failures === 0 ? "\nALL VIEW-FULL TESTS PASSED" : `\n${failures} VIEW-FULL TEST(S) FAILED`);
 process.exit(failures === 0 ? 0 : 1);

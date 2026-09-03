@@ -858,7 +858,12 @@ export default {
         activationLink = fast.activationLink;
         otpCode = fast.otpCode;
         previewText = fast.previewText;
-        allLinks = fast.activationLink ? [fast.activationLink] : [];
+        // Stage 2: activationLinks holds only genuinely qualified
+        // verification/action URLs (best-first, max 3). The scalar
+        // activationLink (the single primary link) always leads the list.
+        allLinks = Array.isArray(fast.activationLinks) && fast.activationLinks.length > 0
+          ? fast.activationLinks.slice(0, 3)
+          : (fast.activationLink ? [fast.activationLink] : []);
         console.log(`[email-in] fast-path size=${rawEmailText ? rawEmailText.length : 0} link=${activationLink ? "yes" : "no"} otp=${JSON.stringify(otpCode)}`);
       } catch (extractErr) {
         console.error(`[email-in] extract failed: ${extractErr && extractErr.stack ? extractErr.stack : extractErr}`);
@@ -1018,12 +1023,20 @@ function buildEmailNotificationText(opts) {
   let viewCallback = "";
   if (inboxId) viewCallback = `view_${inboxId}`;
 
+  // Stage 2: link and OTP are independent — when an email contains both
+  // a qualified verification link AND a code, both are shown (link first,
+  // then the code). Branch C (subject + preview) only renders when
+  // NEITHER action exists. Every external LTR value stays wrapped in
+  // <code> + FSI/PDI (the anchor itself stays plain inline HTML — never
+  // inside <code>).
   if (activationLink) {
     const linkText = linkLabelFor(activationLink, t);
     actionLines.push(`🔗 <a href="${escapeAttribute(activationLink)}">${escapeHtml(linkText)}</a>`);
-  } else if (otpCode) {
+  }
+  if (otpCode) {
     actionLines.push(`🔑 <b>${escapeHtml(t.otpLabel)}:</b> <code>\u2066${escapeHtml(otpCode)}\u2069</code>`);
-  } else {
+  }
+  if (actionLines.length === 0) {
     // Fallback: subject + 200-char preview. Both wrapped in <code> so the
     // user can tap-to-copy. Preview is omitted if empty.
     const subj = subject || "(No Subject)";
@@ -1834,19 +1847,23 @@ async function renderFullEmail(chatId, messageId, emailItem, env, lang = "fa") {
   // (it's already trusted HTML) — we only escapeHtml the user-supplied
   // URL and the dynamic label text.
   let actionHtml = "";
-  if (storedLink) {
-    if (isAparatEmail(emailItem.from, storedLink, emailItem.subject)) {
-      actionHtml = "";
-    } else {
-      const linkText = linkLabelFor(storedLink, t);
-      // Use the Persian-localized "Verification Links" label as a plain
-      // bold string. We don't need to nest this inside <b> again because
-      // t.linksTitle already wraps the visible label in <b>; we just emit
-      // the icon + the inner label text directly.
-      actionHtml = `🔗 ${t.linksTitle.includes("لینک") ? "لینک تایید:" : "Verification Link:"} <code>\u2066<a href="${escapeAttribute(storedLink)}">${escapeHtml(linkText)}</a>\u2069</code>\n\n`;
-    }
-  } else if (storedOtp) {
-    actionHtml = `🔑 <b>${escapeHtml(t.otpLabel)}:</b> <code>\u2066${escapeHtml(storedOtp)}\u2069</code>\n\n`;
+  // Stage 2: link and OTP are independent — the full view shows BOTH when
+  // both were extracted (matching the primary alert). Aparat-specific
+  // suppression of the action line is preserved exactly as before.
+  if (storedLink && !isAparatEmail(emailItem.from, storedLink, emailItem.subject)) {
+    const linkText = linkLabelFor(storedLink, t);
+    // Use the Persian-localized "Verification Links" label as a plain
+    // bold string. We don't need to nest this inside <b> again because
+    // t.linksTitle already wraps the visible label in <b>; we just emit
+    // the icon + the inner label text directly.
+    //
+    // The anchor MUST be plain inline HTML (same proven pattern as the
+    // linksHtml list above): wrapping <a> inside <code> makes Telegram
+    // render it as a copy-menu code block instead of a clickable link.
+    actionHtml += `🔗 ${t.linksTitle.includes("لینک") ? "لینک تایید:" : "Verification Link:"} \u2066<a href="${escapeAttribute(storedLink)}">${escapeHtml(linkText)}</a>\u2069\n\n`;
+  }
+  if (storedOtp) {
+    actionHtml += `🔑 <b>${escapeHtml(t.otpLabel)}:</b> <code>\u2066${escapeHtml(storedOtp)}\u2069</code>\n\n`;
   }
 
   // Telegram's hard message cap is 4096 chars. If the parsed body is huge
@@ -1932,7 +1949,13 @@ async function sendTelegramMessage(botToken, chatId, text, replyMarkup = null) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload)
   });
-  return await res.json();
+  let json = null;
+  try { json = await res.json(); } catch (e) { json = null; }
+  if (!res.ok || (json && json.ok === false)) {
+    const desc = (json && json.description) ? json.description : `HTTP ${res.status}`;
+    throw new Error(`Telegram API error: ${desc}`);
+  }
+  return json;
 }
 
 async function editTelegramMessage(botToken, chatId, messageId, text, replyMarkup = null) {
@@ -1950,7 +1973,20 @@ async function editTelegramMessage(botToken, chatId, messageId, text, replyMarku
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload)
   });
-  return await res.json();
+  let json = null;
+  try { json = await res.json(); } catch (e) { json = null; }
+  // Benign Telegram 400: editing a message with identical content. Treated
+  // as success (same no-op behavior as before this fix) so redundant
+  // Refresh/Back taps don't surface as errors.
+  if (json && !res.ok && typeof json.description === "string" &&
+      json.description.includes("message is not modified")) {
+    return json;
+  }
+  if (!res.ok || (json && json.ok === false)) {
+    const desc = (json && json.description) ? json.description : `HTTP ${res.status}`;
+    throw new Error(`Telegram API error: ${desc}`);
+  }
+  return json;
 }
 
 async function answerCallbackQuery(botToken, callbackQueryId, text, showAlert = false) {
@@ -2743,38 +2779,44 @@ const TRACKER_HOSTS = new Set([
   "trib.al", "lnkd.in", "fb.me", "youtu.be", "tr.ee",
   "mcaf.ee", "po.st", "adf.ly", "shorte.st", "sh.st"
 ]);
-const VERIFY_QUERY_KEYWORDS = [
-  "token=", "code=", "key=", "hash=", "otp=", "secret=",
-  "confirmation_token=", "verify_token=",
-  "confirmation=", "confirm=", "verify=", "validation=",
-  "activation=", "activate=", "verification=", "verified=",
-  "signup=", "sign-up=", "register=", "registration=",
-  "auth=", "auth_token=", "session=", "session_token=",
-  "email_token=", "email-token=", "email_confirm_token=",
-  "email-confirm-token=", "verify_token=", "verification_token=",
-  "verification-token=", "reset_token=", "reset-token=",
-  "activation_token=", "activation-token=", "invite=", "invitation=",
-  "ticket=", "challenge=", "nonce=", "id=", "uid=",
-  "user_id=", "userid=", "account_id=", "accountid=",
-  "u=", "k=", "v=", "h=", "t=",
-  "user=", "username=", "account=", "email=", "emailaddress=",
-  "redirect_uri=", "redirect-url=", "next=", "return_to=",
-  "return-to=", "continue=", "goto=",
-  "lang=", "locale=", "l=", "lng=",
-  "ttl=", "expires=", "expiry=", "exp=",
-  "sig=", "signature=", "s=",
-  "action=", "type=", "kind=",
-  "url=", "link=", "ref=",
-  "_token=", "csrf=", "csrf_token=", "state="
+// Query-parameter classification (Stage 2). STRONG params are sufficient
+// on their own to qualify a URL as a verification/action link; WEAK params
+// only corroborate a path/context signal and can never qualify a URL
+// alone. Single-letter params (u=, k=, v=, h=, t=, l=, s=) are dropped
+// entirely — they were the main source of tracking URLs winning the
+// primary-link slot.
+const VERIFY_QUERY_STRONG = [
+  "token", "code", "otp", "secret", "hash", "key",
+  "confirmation_token", "verify_token", "verification_token", "verification-token",
+  "confirmation", "confirm", "verify", "validation", "verified",
+  "activation", "activate", "activation_token", "activation-token",
+  "signup", "sign-up", "register", "registration",
+  "auth_token", "session_token", "email_token", "email-token",
+  "email_confirm_token", "email-confirm-token",
+  "reset_token", "reset-token", "_token",
+  "invite", "invitation", "ticket", "challenge", "nonce"
 ];
+const VERIFY_QUERY_WEAK = [
+  "id", "uid", "user_id", "userid", "account_id", "accountid",
+  "user", "username", "account", "email", "emailaddress",
+  "session", "auth", "sig", "signature", "state",
+  "redirect_uri", "redirect-url", "next", "return_to", "return-to",
+  "continue", "goto", "url", "link", "ref",
+  "lang", "locale", "lng", "ttl", "expires", "expiry", "exp",
+  "action", "type", "kind", "csrf", "csrf_token"
+];
+// Legacy flattened list (STRONG + WEAK) — kept for tests/back-compat.
+const VERIFY_QUERY_KEYWORDS =
+  VERIFY_QUERY_STRONG.concat(VERIFY_QUERY_WEAK).map(n => n + "=");
 
 // Keywords in HTML anchor text or surrounding body lines that signal the
 // link IS a verification/activation link even when the URL itself doesn't
 // contain a recognizable keyword in path or query. Used as a fallback by
-// isStrictVerificationUrl() to catch real-world services (Aparat, X/Twitter,
-// many e-commerce onboarding flows, etc.) whose verify URL has a totally
-// arbitrary path like "/users/email-confirm/12345" or "/c/abcd" with no
-// token/code/hash/secret in the query string.
+// the local-context path of scoreVerificationUrl() to catch real-world
+// services (Aparat, X/Twitter, many e-commerce onboarding flows, etc.)
+// whose verify URL has a totally arbitrary path like
+// "/users/email-confirm/12345" or "/c/abcd" with no token/code/hash/secret
+// in the query string.
 const ACTIVATION_CONTEXT_KEYWORDS = [
   "verify", "verification", "verified", "verify-account", "verify email", "verify-email", "verify your",
   "confirm", "confirmation", "confirmed", "confirm your", "confirm email", "confirm-email",
@@ -2796,48 +2838,132 @@ const ACTIVATION_CONTEXT_KEYWORDS = [
   "کلیک کنید", "روی لینک کلیک", "روی دکمه کلیک",
   "اینجا کلیک", "اینجا بزنید", "اینجا را کلیک",
   "عضویت", "اشتراک", "ثبت نام", "ثبت‌نام",
+  "verify account", "confirm account", "verify your", "confirm your",
   "signin", "sign in", "sign-in", "log in", "login",
   "sign up", "signup", "sign-up", "register", "join us",
   "reset password", "forgot password", "recover account"
 ];
 
-function isStrictVerificationUrl(rawUrl, contextText) {
-  if (!rawUrl) return false;
-  const url = String(rawUrl).trim();
-  let parsed;
-  try { parsed = new URL(url); } catch (e) { return false; }
-  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return false;
+// Marketing/unsubscribe URL markers — these are NEVER the primary
+// verification link, no matter what keywords appear elsewhere. (utm_*
+// params are NOT hard-rejected: they only demote ranking in
+// scoreVerificationUrl and can never qualify a URL on their own.)
+const MARKETING_URL_MARKERS = [
+  "unsubscribe", "list-manage", "campaign-"
+];
 
-  const host = (parsed.hostname || "").toLowerCase();
-  if (TRACKER_HOSTS.has(host)) return false;
-
-  const path = (parsed.pathname || "").toLowerCase();
-  const pathIsTracker = TRACKER_PATH_PREFIXES.some(p => path.startsWith(p));
-  if (pathIsTracker) return false;
-
-  const pathHasVerify = VERIFY_PATH_KEYWORDS.some(k => path.includes(k));
-  const queryHasVerify = VERIFY_QUERY_KEYWORDS.some(k =>
-    (parsed.search || "").toLowerCase().includes(k)
-  );
-
-  if (pathHasVerify || queryHasVerify) return true;
-
-  // Context fallback: when the URL itself carries no keyword, accept it
-  // if the surrounding text/anchor-text contains an activation keyword.
-  // This is the safety net for real-world services (Aparat, X/Twitter
-  // email-confirm links, onboarding flows with arbitrary paths like
-  // "/users/email-confirm/12345", etc.) whose verify URL has no
-  // recognizable keyword in path or query.
-  if (contextText && typeof contextText === "string") {
-    const ctx = contextText.toLowerCase();
-    for (const kw of ACTIVATION_CONTEXT_KEYWORDS) {
-      if (ctx.includes(kw)) return true;
-    }
-  }
-
-  return false;
+function hasMarketingMarker(urlString) {
+  const lower = String(urlString || "").toLowerCase();
+  return MARKETING_URL_MARKERS.some(m => lower.includes(m));
 }
 
+// Anchor text for the <a> tag that contains `urlStart`, or "" when the URL
+// is not inside an anchor. Used for verbatim context matching.
+function anchorTextFor(stripped, urlStart) {
+  const aOpen = stripped.lastIndexOf("<a", urlStart);
+  if (aOpen === -1 || urlStart - aOpen > 500) return "";
+  const tagClose = stripped.indexOf(">", aOpen);
+  const aEnd = stripped.indexOf("</a>", urlStart);
+  if (tagClose === -1 || tagClose <= aOpen || aEnd === -1) return "";
+  return stripped.substring(tagClose + 1, aEnd).trim();
+}
+
+// Local context window: the text immediately surrounding a URL occurrence.
+// When the URL sits inside an <a ...>…</a>, ONLY the anchor's inner text is
+// used — the anchor text is the most reliable signal of the link's purpose,
+// and scoping the context this way stops a body-wide "verification code is…"
+// mention from qualifying an unrelated footer/help link. When the anchor
+// text carries no activation keyword, a bounded window around the URL is
+// used as fallback (plain-text links).
+function localContextAround(stripped, urlStart, urlLen) {
+  const anchor = anchorTextFor(stripped, urlStart);
+  if (anchor) return anchor;
+  const WINDOW = 300;
+  const from = Math.max(0, urlStart - WINDOW);
+  const to = Math.min(stripped.length, urlStart + urlLen + WINDOW);
+  return stripped.substring(from, to);
+}
+
+function isStrictVerificationUrl(rawUrl, contextText) {
+  return scoreVerificationUrl(rawUrl, contextText).qualified;
+}
+
+function paramCount(paramNames) {
+  return Array.isArray(paramNames) ? paramNames.length : 0;
+}
+
+// Deterministic score for ranking multiple qualified candidates. Higher is
+// better; a URL qualifies only when it carries at least one GENUINE
+// verification signal:
+//   - a verification keyword in its path (+40), OR
+//   - a strong query param such as token/code/otp (+30), OR
+//   - an activation keyword in its LOCAL context window (+35)
+// Weak query params (+10) only corroborate — they can never qualify a URL
+// alone (this kills "…?id=/u=/v=/t=…"-style tracking URLs).
+// Penalties (utm_* params −15, ≥6 query params −10) only DEMOTE ranking:
+// a URL with a genuine signal always stays at/above the qualification bar,
+// so a real verify link that happens to carry utm tracking params keeps
+// working, while a utm_-only URL never qualifies.
+const QUALIFY_SCORE = 30;
+
+function scoreVerificationUrl(url, localContext) {
+  let parsed;
+  try { parsed = new URL(String(url).trim()); } catch (e) {
+    return { qualified: false, score: -1 };
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    return { qualified: false, score: -1 };
+  }
+
+  const host = (parsed.hostname || "").toLowerCase();
+  if (TRACKER_HOSTS.has(host)) return { qualified: false, score: -1 };
+
+  const path = (parsed.pathname || "").toLowerCase();
+  if (TRACKER_PATH_PREFIXES.some(p => path.startsWith(p))) {
+    return { qualified: false, score: -1 };
+  }
+  if (hasMarketingMarker(url)) {
+    return { qualified: false, score: -1 };
+  }
+
+  const pathHasVerify = VERIFY_PATH_KEYWORDS.some(k => path.includes(k));
+
+  const paramNames = [];
+  try {
+    for (const name of parsed.searchParams.keys()) paramNames.push(name.toLowerCase());
+  } catch (e) { /* malformed query — treat as no params */ }
+  const strongQuery = paramNames.some(n => VERIFY_QUERY_STRONG.includes(n));
+  const weakQuery = paramNames.some(n => VERIFY_QUERY_WEAK.includes(n));
+  const utm = paramNames.some(n => n.startsWith("utm_"));
+
+  const ctx = (localContext && typeof localContext === "string") ? localContext.toLowerCase() : "";
+  let contextHit = false;
+  if (ctx && !pathHasVerify && !strongQuery) {
+    // Local-context fallback. The window mixes anchor text with nearby
+    // prose, so require a LONG activation keyword (≥6 chars or a Persian
+    // phrase) — short generic hits like "active"/"verified" inside a
+    // sentence such as "your verification code is…" must not qualify an
+    // unrelated help/footer link.
+    contextHit = ACTIVATION_CONTEXT_KEYWORDS.some(kw =>
+      kw.length >= 6 && ctx.includes(kw)
+    );
+  }
+
+  const qualified = pathHasVerify || strongQuery || contextHit;
+  if (!qualified) return { qualified: false, score: -1 };
+
+  let score = 0;
+  if (pathHasVerify) score += 40;
+  if (strongQuery) score += 30;
+  if (weakQuery) score += 10;
+  if (contextHit) score += 35;
+  if (paramCount(paramNames) >= 6) score -= 10;
+  if (utm) score -= 15;
+  // Penalties only demote ranking, never disqualify (see block comment).
+  score = Math.max(score, QUALIFY_SCORE);
+
+  return { qualified: true, score };
+}
 // Recognised MIME header field names. If a line starts with one of these
 // followed by ":" it's almost certainly a header (transport, envelope, or
 // per-part), not body content. We use this to drop stray "Received:",
@@ -3036,14 +3162,9 @@ function extractFast(rawEmail) {
     .replace(STYLE_SCRIPT_REGEX, " ")
     .replace(/^\s*--[A-Za-z0-9_.+\-=]{8,80}\s*$/gm, " ");
 
-  // 1) OTP first, then link. New priority policy: when an email contains
-  //    a verification code (labelled or 4-8 digit bare run), the bot must
-  //    surface the code and IGNORE any link, even if a "verify" URL is
-  //    present. This prevents tracking URLs / open-trackers from being
-  //    mistaken for the real action link when the email is actually a
-  //    code email.
+  // 1) OTP scan. Stage 2: the OTP no longer suppresses the link scan —
+  //    code and link are extracted independently below.
   let otpCode = "";
-  let activationLink = "";
 
   // 1a) Labelled OTP scan — runs on the QP-decoded, tag-stripped text so
   //     QP-encoded digits resolve correctly. We only accept 4-8 digits
@@ -3095,38 +3216,48 @@ function extractFast(rawEmail) {
     }
   }
 
-  // 2) Link scan only if no OTP was found.
-  if (!otpCode) {
-    // Context for the strict-URL classifier. We pass the FULL stripped
-    // body (tags removed, entities still encoded) so the context-keyword
-    // fallback can match a Persian "تکمیل ثبت نام" / "تایید حساب" or an
-    // English "click here to confirm" / "verify your email" line that
-    // appears anywhere in the visible body. This is the safety net for
-    // real-world services (Aparat, X/Twitter email-confirm, etc.) whose
-    // verify URL has no recognizable keyword in path or query.
-    const linkContext = stripped;
+  // 2) Link scan — runs ALWAYS (Stage 2): the OTP no longer suppresses
+  //    the link. Both are extracted independently; when an email contains
+  //    both a code and a qualified verification URL, the alert shows both.
+  //    Among multiple qualified URLs, the best-scoring candidate wins
+  //    (deterministic tie-break: earliest position in the body).
+  let activationLink = "";
+  let activationLinks = [];
+  {
     let m;
+    // Collect all candidate URLs once (dedup, keep first-occurrence order).
     URL_REGEX_GLOBAL.lastIndex = 0;
+    const seen = new Set();
+    const candidates = [];
     while ((m = URL_REGEX_GLOBAL.exec(stripped)) !== null) {
-      const raw = m[0];
-      const cleaned = raw.replace(/[),.;\]>]+$/g, "");
-      // Strict classification: path/query must contain a verification
-      // keyword and not be a known tracker. When the URL itself has no
-      // keyword, the function falls back to a context-keyword scan.
-      if (isStrictVerificationUrl(cleaned, linkContext)) {
-        activationLink = cleaned;
-        break;
+      const cleaned = m[0].replace(/[),.;\]>]+$/g, "");
+      if (!cleaned || seen.has(cleaned)) continue;
+      seen.add(cleaned);
+      candidates.push({ url: cleaned, start: m.index });
+      if (candidates.length >= 50) break; // bounded scan
+    }
+    // Score each candidate against its LOCAL context window. The anchor
+    // text inside <a>…</a> is checked VERBATIM as a prefix+suffix boundary
+    // match (generic words like "off" from "50% off" can no longer leak a
+    // false match via substring semantics), plus the bounded window.
+    const qualified = [];
+    for (const c of candidates) {
+      const ctx = localContextAround(stripped, c.start, c.url.length);
+      const anchor = anchorTextFor(stripped, c.start);
+      let verdict = scoreVerificationUrl(c.url, ctx);
+      if (!verdict.qualified && anchor) {
+        const anchorCtx = (anchor + " " + ctx).toLowerCase();
+        verdict = scoreVerificationUrl(c.url, anchorCtx);
+      }
+      if (verdict.qualified && verdict.score >= QUALIFY_SCORE) {
+        qualified.push({ url: c.url, score: verdict.score, start: c.start });
       }
     }
-    if (!activationLink) {
-      URL_REGEX_GLOBAL_LT.lastIndex = 0;
-      const first = URL_REGEX_GLOBAL_LT.exec(stripped);
-      if (first) {
-        const cleaned = first[0].replace(/[),.;\]>]+$/g, "");
-        if (isStrictVerificationUrl(cleaned, linkContext)) {
-          activationLink = cleaned;
-        }
-      }
+    // Best-first: highest score; ties broken by earliest position.
+    qualified.sort((a, b) => (b.score - a.score) || (a.start - b.start));
+    if (qualified.length > 0) {
+      activationLink = qualified[0].url;
+      activationLinks = qualified.slice(0, 3).map(q => q.url);
     }
   }
 
@@ -3137,7 +3268,7 @@ function extractFast(rawEmail) {
   previewText = previewText.replace(/\s+/g, " ").trim();
   previewText = safeTruncateForPreview(previewText, 200);
 
-  return { activationLink, otpCode, previewText };
+  return { activationLink, activationLinks, otpCode, previewText };
 }
 
 /**

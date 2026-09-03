@@ -391,8 +391,8 @@ const codeAndLink =
   "If you didn't request this, visit https://example.com/verify?token=abc.</p>";
 const codeAndLinkFast = mod.extractFast(codeAndLink);
 check("priority: labelled code wins", codeAndLinkFast.otpCode === "815646");
-check("priority: verify link is ignored when code present",
-  codeAndLinkFast.activationLink === "");
+check("priority: verify link ALSO extracted alongside code (Stage 2 both-shown)",
+  codeAndLinkFast.activationLink === "https://example.com/verify?token=abc");
 
 // 6b) Persian-labelled code + verify URL → OTP wins.
 const codeAndLinkFa =
@@ -401,8 +401,8 @@ const codeAndLinkFa =
   "اگر این درخواست از شما نیست، به https://example.com/verify?token=abc مراجعه کنید.</p>";
 const codeAndLinkFaFast = mod.extractFast(codeAndLinkFa);
 check("priority[fa]: labelled code wins", codeAndLinkFaFast.otpCode === "815646");
-check("priority[fa]: verify link ignored when code present",
-  codeAndLinkFaFast.activationLink === "");
+check("priority[fa]: verify link ALSO extracted (Stage 2 both-shown)",
+  codeAndLinkFaFast.activationLink === "https://example.com/verify?token=abc");
 
 // 6c) Code + tracking URL → OTP wins, tracker rejected.
 const codeAndTracker =
@@ -446,7 +446,8 @@ const labelledBare =
   "<p>Order ID: 123456. Code: 654321. Click <a href=\"https://example.com/verify?token=abc\">here</a>.</p>";
 const labelledBareFast = mod.extractFast(labelledBare);
 check("priority: labelled 'Code: 654321' on the same line beats unlabelled 'Order ID: 123456'",
-  labelledBareFast.otpCode === "654321" && labelledBareFast.activationLink === "");
+  labelledBareFast.otpCode === "654321" &&
+  labelledBareFast.activationLink === "https://example.com/verify?token=abc");
 
 // ===========================================================================
 // 7. Strict URL classifier (isStrictVerificationUrl)

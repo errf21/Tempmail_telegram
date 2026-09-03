@@ -123,10 +123,13 @@ check("code: QP-encoded 6-digit OTP found", a4.otpCode === "987654");
 check("code: QP no artifacts in preview",
   !a4.previewText.includes("=20") && !a4.previewText.includes("=3D"));
 
-// A5. Link + code → link wins, code ignored (existing behaviour)
+// A5. Link + code → Stage 2: BOTH are extracted independently (the old
+//     OTP-wins mutual exclusion is gone).
 const a5 = mod.extractFast("From: x@y\r\nTo: u@v\r\nSubject: s\r\nContent-Type: text/html\r\n\r\n<p>Your code: <b>654321</b></p><a href=\"https://example.com/verify?token=abc\">Verify</a>");
 check("code: code takes precedence over link (OTP-wins policy)",
-  a5.activationLink === "" && a5.otpCode === "654321");
+  a5.otpCode === "654321");
+check("code: link also extracted alongside OTP (Stage 2 both-shown)",
+  a5.activationLink === "https://example.com/verify?token=abc");
 
 // A6. 5/6/7/8-digit OTP preference order — a body with multiple digits,
 //     the 6-digit one should be preferred over a 4-digit phone-number
@@ -335,6 +338,25 @@ check("E1[A,en]: exactly one <a> tag (the OTP doesn't use <a>)",
   (e1.match(/<a /g) || []).length === 0);
 check("E1[A,en]: HTML balance", (e1.match(/<code>/g) || []).length === (e1.match(/<\/code>/g) || []).length);
 
+// E1b. Stage 2 both-shown branch: link AND OTP together, still compact.
+const e1b = mod.buildEmailNotificationText({
+  sender: "OpenAI <noreply@openai.com>",
+  subject: "Your verification code",
+  activationLink: "https://auth.openai.com/verify?token=abc",
+  otpCode: "654321",
+  previewText: "should NOT appear",
+  inboxId: "idA2",
+  lang: "en"
+});
+check("E1b[A+B,en]: link line present",
+  e1b.includes(`<a href="https://auth.openai.com/verify?token=abc">✅ Verify Account</a>`));
+check("E1b[A+B,en]: OTP line present with the code",
+  e1b.includes(`<code>${FSI}654321${PDI}</code>`));
+check("E1b[A+B,en]: both-shown output still compact (< 450 chars)",
+  e1b.length < 450);
+check("E1b[A+B,en]: HTML balance",
+  (e1b.match(/<code>/g) || []).length === (e1b.match(/<\/code>/g) || []).length);
+
 // E2. Branch B (link) — en
 const e2 = mod.buildEmailNotificationText({
   sender: "GitHub <noreply@github.com>",
@@ -348,7 +370,7 @@ const e2 = mod.buildEmailNotificationText({
 check("E2[B,en]: service label 'GitHub' (display name preserved)",
   e2.includes("GitHub"));
 check("E2[B,en]: link is <a> with Verify label", e2.includes(`<a href="https://github.com/verify?token=abc">✅ Verify Account</a>`));
-check("E2[B,en]: OTP '111111' NOT shown", !/111111/.test(e2));
+check("E2[B,en]: OTP '111111' ALSO shown (Stage 2 both-shown)", /111111/.test(e2));
 check("E2[B,en]: no preview line", !/should NOT appear/.test(e2));
 check("E2[B,en]: no raw URL inside <code>", !/<code>https?:/.test(e2));
 
