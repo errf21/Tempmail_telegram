@@ -6,7 +6,7 @@ compatibility_date = "2024-01-01"
 [[d1_databases]]
 binding = "DB"
 database_name = "tempmail-db"
-database_id = "5ef2bdbb-d644-426a-b915-f20e81b7b390"
+database_id = "d4bb85dc-568f-40ef-a7c2-7605902b07de"
 
 # Environment Variables
 [vars]
