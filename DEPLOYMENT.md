@@ -27,8 +27,9 @@ Termux: edit → git push
 | `_worker.js` | Application code (LOCKED — do not modify for deployment reasons) |
 | `wrangler.toml` | Declarative config: worker name, D1 binding + `migrations_dir`, plain vars (`DOMAIN`, `MULTI_USER`, `TELEGRAM_USER_ID`), `workers_dev = true` |
 | `migrations/*.sql` | Version-controlled D1 schema (wrangler-tracked) |
-| `scripts/deploy.sh` | Every-deploy pipeline (Dashboard deploy command points here) |
-| `scripts/bootstrap.sh` | One-time bootstrap for a new Cloudflare account |
+| `scripts/deploy.sh` | Every-deploy pipeline (Dashboard deploy command points here). Runs wrangler inside Workers Builds (Ubuntu — wrangler has no Android build, so it cannot run fully inside Termux). Includes a branch guard: on non-production branches it exits without deploying — keep the non-production deploy command at its default (`npx wrangler versions upload`) |
+| `scripts/bootstrap.sh` | One-time bootstrap for a new Cloudflare account. **REST-based (no wrangler) so it runs on Termux** via `scripts/lib/cf-rest.mjs`. Order: D1 create → migrations (recorded in `d1_migrations`) → first deploy (creates the Worker) → workers.dev subdomain → BOT_TOKEN secret → Email Routing catch-all → webhook. Existing secrets/catch-all rules are never overwritten without explicit confirmation |
+| `scripts/lib/cf-rest.mjs` | Dependency-free Cloudflare REST helper used by bootstrap (D1, deploy, secrets, subdomain, migrations) |
 | `.dev.vars.example` | Template for local dev secrets (real `.dev.vars` is git-ignored) |
 | `deploy.py`, `apply_migration.py`, `metadata.json` | **LEGACY** — the old manual REST deploy path. Kept for history, no longer used. Their D1 ids are stale. |
 
@@ -39,16 +40,18 @@ Termux: edit → git push
 Run **after** editing `wrangler.toml` and setting the real `DOMAIN`:
 
 ```bash
-npx wrangler login                      # or export CLOUDFLARE_API_TOKEN
-export CLOUDFLARE_API_TOKEN=...         # zone-scoped token for Email Routing steps
+export CLOUDFLARE_API_TOKEN=...   # see permission list in scripts/bootstrap.sh header
 bash scripts/bootstrap.sh
 ```
 
-`bootstrap.sh` is idempotent and automates: D1 creation (writes the new
-`database_id` into `wrangler.toml` — commit that change), migrations, the
-`BOT_TOKEN` secret (typed once, hidden, never stored), Email Routing enable +
-catch-all → Worker (via API, if `CLOUDFLARE_API_TOKEN` is set), first deploy,
-webhook registration.
+`bootstrap.sh` is idempotent, requires no wrangler (it uses the Cloudflare
+REST API directly, because wrangler has no Android/Termux build), and
+automates: D1 creation (writes the new `database_id` into `wrangler.toml` —
+commit that change), migrations (tracked in `d1_migrations` exactly like
+wrangler, so CI stays in sync), first deploy (creates the Worker), the
+`BOT_TOKEN` secret (typed once, hidden, never stored, overwrite-confirmed),
+workers.dev subdomain, Email Routing enable + catch-all → Worker (with
+overwrite protection), and webhook registration.
 
 ## ONE-TIME GitHub / Workers Builds setup (browser)
 
@@ -57,8 +60,14 @@ webhook registration.
    branch `main`.
 3. Deploy command: **`bash scripts/deploy.sh`**
    (or leave the default and rely on wrangler — but the script adds tests,
-   migrations and webhook registration).
-4. Save. Never touch it again — pipeline changes are made by editing
+   migrations and webhook registration). Workers Builds uses the Wrangler
+   version pinned in `package.json` (currently `4.129.0`; the build image
+   ships Node 24, which satisfies wrangler's Node ≥ 22 requirement).4. **Build token D1 permission (important):** the auto-generated build API
+   token does NOT include D1 permissions, so `wrangler d1 migrations apply`
+   inside the build would fail. After connecting, go to My Profile →
+   API Tokens and add **D1: Edit** to the build token (or supply your own
+   token with *Workers Scripts Edit + D1 Edit* when connecting).
+5. Save. Never touch it again — pipeline changes are made by editing
    `scripts/deploy.sh` in git.
 
 ## EVERY-FUTURE-DEPLOY (fully automatic)
@@ -79,7 +88,8 @@ across deploys — wrangler never touches existing secret bindings.
 ## Secrets policy
 
 - **BOT_TOKEN is a Worker SECRET.** It is NEVER in `wrangler.toml`, git, or
-  CI variables. `wrangler secret put BOT_TOKEN` (done once by bootstrap).
+  CI variables. `wrangler secret put BOT_TOKEN` (done once by bootstrap, with
+  overwrite confirmation if a secret already exists).
 - **Never add BOT_TOKEN to `[vars]`** — a placeholder there would overwrite
   the real secret on deploy; the Worker would deploy fine and then every
   Telegram API call would 401.
@@ -90,15 +100,42 @@ across deploys — wrangler never touches existing secret bindings.
 
 ```bash
 npm install
-cp .dev.vars.example .dev.vars   # then edit .dev.vars with a dev bot token
-npx wrangler dev
 npm test
 ```
 
-## Troubleshooting / invariants
+NOTE: `wrangler dev` / local `wrangler deploy` do NOT work on Termux/Android
+(wrangler has no Android build — "Unsupported platform: android arm64 LE").
+Local verification = `npm test` (plain Node, no Cloudflare needed); local
+deploy is not supported — use `git push`. On a Linux/macOS machine,
+`cp .dev.vars.example .dev.vars` + `npx wrangler dev` work normally.
+
+## Notes & invariants
+
+- **workers.dev URL**: `workers_dev = true` keeps the subdomain enabled; the
+  URL (`https://temp-mail-bot.<account-subdomain>.workers.dev`) is stable as
+  long as the Worker name and account subdomain are unchanged, and its valid
+  TLS certificate is accepted by Telegram for webhooks.
+- **Email Routing API**: `POST /zones/{zone}/email/routing/enable` is marked
+  deprecated but remains functional (adds+locks MX/SPF); bootstrap falls back
+  to the DNS-records endpoint and prints manual Dashboard steps on failure.
+  Catch-all → Worker uses `PUT /zones/{zone}/email/routing/rules/catch_all`
+  (permission: *Email Routing Rules Write*); an existing non-worker catch-all
+  is never overwritten without explicit confirmation.
+- **Migrations on a fresh database**: all migrations run in filename order,
+  exactly once, tracked in the `d1_migrations` table — safe for fresh and
+  existing databases alike. The Termux bootstrap applies them via REST and
+  records them in the same `d1_migrations` table wrangler uses, so CI's
+  `wrangler d1 migrations apply` never re-runs or double-applies. Never edit
+  an already-applied migration.
+- `ensureSchema()` inside `_worker.js` only self-heals the `email_tokens`
+  table (migration 0004). All other schema MUST come from `migrations/`.
+
+## Troubleshooting
 
 - **Deploy OK but bot dead (401s)** → BOT_TOKEN got overwritten by a var, or
   the secret was never set. Fix: `wrangler secret put BOT_TOKEN`.
+- **Build fails at the migrations step** → build token lacks D1 permission
+  (see setup step 4 above).
 - **Deploy OK but no emails arrive** → Email Routing catch-all is not pointed
   at the Worker, `DOMAIN` in `wrangler.toml` doesn't match the mail zone, or
   migrations 0001–0003 were never applied to the database.
@@ -107,5 +144,3 @@ npm test
   `curl https://<worker-url>/set-webhook` once.
 - **Worker 200 at `/` but every DB call throws** → D1 `database_id` wrong or
   migrations not applied. Check `npx wrangler d1 migrations list DB --remote`.
-- `ensureSchema()` inside `_worker.js` only self-heals the `email_tokens`
-  table (migration 0004). All other schema MUST come from `migrations/`.

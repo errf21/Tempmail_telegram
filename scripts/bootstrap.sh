@@ -4,62 +4,75 @@
 #
 # Run ONCE from Termux:   bash scripts/bootstrap.sh
 #
-# What it does (idempotent — safe to re-run):
-#   1. Verifies wrangler authentication
-#   2. Creates the D1 database "tempmail-db" if missing and writes its id
-#      into wrangler.toml
-#   3. Applies all D1 migrations (0001..000N) to the remote database
-#   4. Prompts for BOT_TOKEN and stores it as a Worker SECRET
-#      (never written to disk or git)
-#   5. [Zone config] Enables Email Routing on the DOMAIN zone and points the
-#      catch-all rule at this Worker (uses CLOUDFLARE_API_TOKEN + REST API)
-#   6. Performs the first `wrangler deploy`
-#   7. Registers the Telegram webhook (from the deploy output URL)
+# IMPORTANT: this script does NOT use wrangler. Cloudflare wrangler has no
+# Android build ("Unsupported platform: android arm64 LE"), so on Termux all
+# Cloudflare operations are performed via the REST API through
+# scripts/lib/cf-rest.mjs (Node >= 18, no dependencies) + curl. The regular
+# every-push pipeline (scripts/deploy.sh) runs wrangler inside Cloudflare
+# Workers Builds, where it works normally.
+#
+# Ordering is deliberate (safe on a brand-new account where nothing exists):
+#   1. Token verification + account id
+#   2. D1 database "tempmail-db" created if missing; id written to wrangler.toml
+#   3. D1 migrations applied via REST (recorded in d1_migrations exactly like
+#      wrangler does, so CI's `wrangler d1 migrations apply` stays in sync)
+#   4. FIRST deploy via REST — creates the Worker
+#      (required before secrets, which need an existing script)
+#   5. workers.dev subdomain enabled for the script
+#   6. BOT_TOKEN stored as a Worker SECRET (overwrite confirmation)
+#   7. Email Routing enabled + catch-all pointed at the Worker
+#      (an existing non-worker catch-all is NEVER silently overwritten)
+#   8. Telegram webhook registered
 #
 # Prerequisites BEFORE running:
 #   - Edit wrangler.toml [vars]: set DOMAIN to the real mail domain
 #   - The domain's zone must exist in this Cloudflare account
-#   - Auth: `wrangler login` (account-scoped actions), plus env
-#     CLOUDFLARE_API_TOKEN for the zone/Email Routing API steps (needs
-#     Zone > Email Routing Rules > Edit + Zone > DNS > Edit + Zone > Zone > Read)
+#   - env CLOUDFLARE_API_TOKEN with: Account > Workers Scripts (Edit),
+#     Account > D1 (Edit), Account > Account Settings (Read),
+#     Zone > Zone (Read), Zone > DNS (Edit), Zone > Email Routing Rules (Edit)
+#   - Optional: CLOUDFLARE_ACCOUNT_ID (auto-detected from the token otherwise)
 #
+# Idempotent: safe to re-run.
 # NO REAL SECRETS ARE EVER WRITTEN TO DISK OR GIT BY THIS SCRIPT.
 # ============================================================================
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-WORKER_NAME="temp-mail-bot"
 WRANGLER_TOML="wrangler.toml"
+CF="node scripts/lib/cf-rest.mjs"
 
 fail() { echo "ERROR: $*" >&2; exit 1; }
 command -v curl >/dev/null 2>&1 || fail "curl is required"
 command -v node >/dev/null 2>&1 || fail "node is required"
+[ -f scripts/lib/cf-rest.mjs ] || fail "scripts/lib/cf-rest.mjs missing"
+[ -f "$WRANGLER_TOML" ] || fail "wrangler.toml missing"
+[ -f "_worker.js" ] || fail "_worker.js missing"
 
-echo "==> [0/7] Pre-flight checks"
+WORKER_NAME="$(sed -n 's/^name[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$WRANGLER_TOML" | head -1)"
+[ -n "$WORKER_NAME" ] || fail "cannot read worker name from wrangler.toml"
+
+echo "==> [0/9] Pre-flight checks"
 grep -q '^DOMAIN *= *"yourdomain\.com"' "$WRANGLER_TOML" 2>/dev/null && \
   fail "wrangler.toml still has the placeholder DOMAIN. Set the real domain first."
 DOMAIN="$(sed -n 's/^DOMAIN *= *"\([^"]*\)".*/\1/p' "$WRANGLER_TOML" | head -1)"
 [ -n "$DOMAIN" ] || fail "Could not read DOMAIN from wrangler.toml"
-echo "    DOMAIN = ${DOMAIN}"
+[ -n "${CLOUDFLARE_API_TOKEN:-}" ] || fail "CLOUDFLARE_API_TOKEN is not set (see the permission list in the header of this file)"
+echo "    worker: ${WORKER_NAME} | DOMAIN: ${DOMAIN}"
 
-echo "==> [1/7] Wrangler auth check"
-npx wrangler whoami || fail "Not authenticated. Run: npx wrangler login (and/or export CLOUDFLARE_API_TOKEN)"
+echo "==> [1/9] Token verification + account id"
+ACCOUNT_ID="$($CF whoami)" || fail "token verification failed"
+[ -n "$ACCOUNT_ID" ] || fail "could not determine account id"
+echo "    account: ${ACCOUNT_ID}"
 
-echo "==> [2/7] D1 database"
-DB_ID="$(npx wrangler d1 list --json 2>/dev/null | node -e '
-  let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{
-    try{const j=JSON.parse(d);const list=Array.isArray(j)?j:(j.result||[]);
-    const db=list.find(x=>x&&x.name==="tempmail-db")||null;
-    console.log(db?(db.uuid||db.database_id||""):"")}catch(e){console.log("")}})')"
+echo "==> [2/9] D1 database"
+DB_ID="$($CF d1-list | awk -F'\t' '$1=="tempmail-db"{print $2}')"
 if [ -n "$DB_ID" ]; then
   echo "    D1 'tempmail-db' exists: ${DB_ID}"
 else
   echo "    Creating D1 database 'tempmail-db'..."
-  CREATE_OUT="$(npx wrangler d1 create tempmail-db 2>&1)" || fail "d1 create failed: ${CREATE_OUT}"
-  echo "$CREATE_OUT"
-  DB_ID="$(printf '%s\n' "$CREATE_OUT" | grep -oE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' | head -1)"
-  [ -n "$DB_ID" ] || fail "Could not parse database_id from 'wrangler d1 create' output"
+  DB_ID="$($CF d1-create tempmail-db)"
+  [ -n "$DB_ID" ] || fail "D1 create returned no id"
   echo "    Created: ${DB_ID}"
 fi
 if grep -q "\"${DB_ID}\"" "$WRANGLER_TOML"; then
@@ -76,64 +89,112 @@ else
   echo "    wrangler.toml database_id -> ${DB_ID}  (remember to git commit this change)"
 fi
 
-echo "==> [3/7] D1 migrations (remote)"
-npx wrangler d1 migrations apply DB --remote
+echo "==> [3/9] D1 migrations (via REST, tracked in d1_migrations)"
+$CF migrate "$ACCOUNT_ID" "$DB_ID"
 
-echo "==> [4/7] BOT_TOKEN secret"
-echo -n "Enter BOT_TOKEN (hidden input; stored as Worker secret, never written to disk or git): "
-read -rs BOT_TOKEN; echo
-[ -n "$BOT_TOKEN" ] || fail "BOT_TOKEN cannot be empty"
-printf '%s' "$BOT_TOKEN" | npx wrangler secret put BOT_TOKEN
-unset BOT_TOKEN
+echo "==> [4/9] First deploy (creates the Worker; BOT_TOKEN not yet set — expected)"
+$CF deploy "$ACCOUNT_ID" "$WORKER_NAME"
 
-echo "==> [5/7] Email Routing + catch-all -> Worker (zone API)"
-if [ -z "${CLOUDFLARE_API_TOKEN:-}" ]; then
-  echo "    SKIPPED: CLOUDFLARE_API_TOKEN not set." >&2
-  echo "    Configure Email Routing manually in the Dashboard:" >&2
-  echo "      1. Enable Email Routing on the '${DOMAIN}' zone (adds MX/SPF records)" >&2
-  echo "      2. Routing rules -> Catch-all -> Send to Worker '${WORKER_NAME}'" >&2
+echo "==> [5/9] workers.dev subdomain"
+SUBDOMAIN="$($CF subdomain "$ACCOUNT_ID" "$WORKER_NAME" 2>/dev/null || true)"
+if [ -n "$SUBDOMAIN" ] && [ "$SUBDOMAIN" != "NO_SUBDOMAIN" ]; then
+  WORKER_URL="https://${WORKER_NAME}.${SUBDOMAIN}.workers.dev"
+  echo "    ${WORKER_URL}"
 else
-  API="https://api.cloudflare.com/client/v4"
-  AUTH=(-H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" -H "Content-Type: application/json")
-  ZONE_ID="$(curl -fsS "${AUTH[@]}" "${API}/zones?name=${DOMAIN}" | node -e '
-    let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{
-      try{const j=JSON.parse(d);console.log(j.result&&j.result[0]?j.result[0].id:"")}
-      catch(e){console.log("")}})')"
-  [ -n "$ZONE_ID" ] || fail "Zone '${DOMAIN}' not found in this account (is the domain on Cloudflare yet?)"
-  echo "    zone: ${ZONE_ID}"
+  WORKER_URL=""
+  echo "    Could not resolve/register the workers.dev subdomain automatically." >&2
+  echo "    Register it in Dashboard (Workers & Pages > Subdomain) — the URL" >&2
+  echo "    also appears in the first Workers Builds deploy." >&2
+fi
 
-  # 5a. Enable Email Routing (idempotent; adds required MX/SPF DNS records)
-  if curl -fsS -X POST "${AUTH[@]}" "${API}/zones/${ZONE_ID}/email/routing/enable" >/dev/null 2>&1; then
-    echo "    Email Routing enabled"
+echo "==> [6/9] BOT_TOKEN secret"
+if $CF secret-list "$ACCOUNT_ID" "$WORKER_NAME" | grep -qx "BOT_TOKEN"; then
+  echo "    BOT_TOKEN secret ALREADY EXISTS on '${WORKER_NAME}'."
+  if [ -t 0 ]; then
+    read -r -p "    Overwrite it with a new value? [y/N] " ANSWER
+    case "${ANSWER:-N}" in y|Y) DO_SECRET=1 ;; *) DO_SECRET=0 ;; esac
   else
-    echo "    Email Routing enable returned non-2xx (usually already enabled) — continuing"
+    echo "    Non-interactive session: keeping the existing secret (set CONFIRM_OVERWRITE=1 to force)."
+    DO_SECRET="${CONFIRM_OVERWRITE:-0}"
+  fi
+else
+  DO_SECRET=1
+fi
+if [ "${DO_SECRET}" = "1" ]; then
+  echo -n "Enter BOT_TOKEN (hidden input; stored as Worker secret, never written to disk or git): "
+  read -rs BOT_TOKEN; echo
+  [ -n "$BOT_TOKEN" ] || fail "BOT_TOKEN cannot be empty"
+  printf '%s' "$BOT_TOKEN" | $CF secret-put "$ACCOUNT_ID" "$WORKER_NAME" BOT_TOKEN
+  unset BOT_TOKEN
+else
+  echo "    Keeping existing BOT_TOKEN secret."
+fi
+
+echo "==> [7/9] Email Routing + catch-all -> Worker (zone API)"
+API="https://api.cloudflare.com/client/v4"
+AUTH=(-H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" -H "Content-Type: application/json")
+ZONE_ID="$(curl -fsS "${AUTH[@]}" "${API}/zones?name=${DOMAIN}" | node -e '
+  let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{
+    try{const j=JSON.parse(d);console.log(j.result&&j.result[0]?j.result[0].id:"")}
+    catch(e){console.log("")}})')"
+[ -n "$ZONE_ID" ] || fail "Zone '${DOMAIN}' not found in this account (is the domain on Cloudflare yet?)"
+echo "    zone: ${ZONE_ID}"
+
+# 7a. Current catch-all state — never silently overwrite a different rule.
+CURRENT_ACTION="$(curl -fsS "${AUTH[@]}" "${API}/zones/${ZONE_ID}/email/routing/rules/catch_all" | node -e '
+  let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{
+    try{const j=JSON.parse(d);const a=j.result&&j.result.actions?j.result.actions[0]:null;
+    console.log(a?a.type+":"+(a.value?a.value.join(","):""):"none")}
+    catch(e){console.log("none")}})')"
+if [ "${CURRENT_ACTION}" = "worker:${WORKER_NAME}" ]; then
+  echo "    catch-all already points at '${WORKER_NAME}' — nothing to do"
+else
+  if [ "${CURRENT_ACTION}" != "none" ] && [ "${CURRENT_ACTION}" != "worker:" ] && [ "${CURRENT_ACTION}" != "drop:" ]; then
+    echo "    WARNING: existing catch-all action is '${CURRENT_ACTION}' (not this Worker)." >&2
+    if [ -t 0 ]; then
+      read -r -p "    Overwrite it with catch-all -> Worker '${WORKER_NAME}'? [yes/N] " ANSWER
+      [ "${ANSWER:-N}" = "yes" ] || fail "Aborted: catch-all left unchanged. Configure Email Routing manually."
+    else
+      fail "Existing catch-all points elsewhere ('${CURRENT_ACTION}'). Set CONFIRM_OVERWRITE=1 to overwrite."
+    fi
   fi
 
-  # 5b. Point the catch-all rule at this Worker (idempotent upsert)
+  # 7b. Enable Email Routing (idempotent; adds+locks required MX/SPF records).
+  #     The /enable endpoint is marked deprecated but remains the functional
+  #     one-step call; fall back to the DNS-records endpoint, then to manual.
+  if curl -fsS -X POST "${AUTH[@]}" "${API}/zones/${ZONE_ID}/email/routing/enable" >/dev/null 2>&1; then
+    echo "    Email Routing enabled (MX/SPF records added/verified)"
+  elif curl -fsS -X POST "${AUTH[@]}" "${API}/zones/${ZONE_ID}/email/routing/dns" >/dev/null 2>&1; then
+    echo "    Email Routing DNS records created via fallback endpoint"
+  else
+    echo "    Email Routing API calls failed — enable it manually in the Dashboard:" >&2
+    echo "      Email > Email Routing > Enable (zone '${DOMAIN}')" >&2
+  fi
+
+  # 7c. Point the catch-all rule at this Worker (idempotent upsert).
   curl -fsS -X PUT "${AUTH[@]}" \
     "${API}/zones/${ZONE_ID}/email/routing/rules/catch_all" \
-    --data "{\"matchers\":[{\"type\":\"all\"}],\"actions\":[{\"type\":\"worker\",\"value\":[\"${WORKER_NAME}\"]}],\"enabled\":true,\"name\":\"catch-all to ${WORKER_NAME}\"}" \
+    --data "{\"matchers\":[{\"type\":\"all\"}],\"actions\":[{\"type\":\"worker\",\"value\":[\"${WORKER_NAME}\"]}],\"enabled\":true,\"name\":\"catch-all to ${WORKER_NAME}\",\"source\":\"api\"}" \
     | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{try{const j=JSON.parse(d);console.log(j.success?"    catch-all -> worker OK":"    catch-all FAILED: "+JSON.stringify(j.errors))}catch(e){console.log("    catch-all response: "+d)}})'
 fi
 
-echo "==> [6/7] First deploy"
-DEPLOY_OUTPUT="$(npx wrangler deploy 2>&1)"
-echo "$DEPLOY_OUTPUT"
-WORKER_URL="$(printf '%s\n' "$DEPLOY_OUTPUT" | grep -oE 'https://[a-zA-Z0-9.-]+\.workers\.dev' | head -1 || true)"
-
-echo "==> [7/7] Telegram webhook"
+echo "==> [8/9] Telegram webhook"
 if [ -n "$WORKER_URL" ]; then
   echo "    Registering ${WORKER_URL}/webhook"
-  curl -fsS "${WORKER_URL}/set-webhook" && echo
+  curl -fsS --retry 4 --retry-delay 2 --retry-connrefused "${WORKER_URL}/set-webhook" && echo
 else
-  echo "    Could not determine workers.dev URL from deploy output." >&2
-  echo "    Run once manually:  curl https://<worker-url>/set-webhook" >&2
+  echo "    SKIPPED: no workers.dev URL yet. After the first Workers Builds deploy:" >&2
+  echo "    curl https://<worker-url>/set-webhook  (or re-run this script)" >&2
 fi
 
-echo ""
+echo "==> [9/9] Summary"
+echo "    Worker : ${WORKER_NAME}"
+echo "    URL    : ${WORKER_URL:-<available after first Workers Builds deploy>}"
+echo "    D1     : tempmail-db (${DB_ID})"
+echo "    Domain : ${DOMAIN}"
 echo "======================================================================"
 echo " Bootstrap complete."
-echo " Next: create the GitHub repo, push, and connect Workers Builds with"
-echo " the deploy command:   bash scripts/deploy.sh"
-echo " See DEPLOYMENT.md for details."
+echo " Next: push to GitHub, connect Workers Builds with deploy command:"
+echo "     bash scripts/deploy.sh"
+echo " and add 'D1: Edit' permission to the build API token (see DEPLOYMENT.md)."
 echo "======================================================================"
