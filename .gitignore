@@ -95,3 +95,22 @@ storage/music
 storage/pictures
 storage/shared
 termux-files
+
+# ============================================================================
+# Local-only tooling & data (Termux environment) — NEVER commit these
+# ============================================================================
+# Reference schema copy (authoritative schema lives in migrations/)
+db/
+# Network benchmark tooling
+dnsperftest/
+# Go module cache / gVisor source (~200MB, unrelated to this project)
+go/
+# Scratch files (binary dumps)
+tmp/
+# Separate, unrelated project (has its own .git)
+nahanplus/
+# Local binaries and archives
+opencode
+opencode.*
+senpaiscanner
+c86602_26senpaiscanner.zip

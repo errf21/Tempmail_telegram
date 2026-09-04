@@ -1,0 +1,12 @@
+# Copy this file to `.dev.vars` (git-ignored) for local development (`wrangler dev`).
+# NEVER commit the real .dev.vars or any real token.
+#
+# BOT_TOKEN is a Worker SECRET in production (set via `wrangler secret put
+# BOT_TOKEN`). For local dev it is provided here because secrets are not
+# available to `wrangler dev` by default.
+BOT_TOKEN=123456789:AAExample_Token_From_BotFather
+
+# Optional local overrides of the plain vars already declared in wrangler.toml:
+# DOMAIN=yourdomain.com
+# MULTI_USER=true
+# TELEGRAM_USER_ID=

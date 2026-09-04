@@ -2,15 +2,29 @@ name = "temp-mail-bot"
 main = "_worker.js"
 compatibility_date = "2024-01-01"
 
-# D1 Database Binding for sessions, email bindings, inbox, and per-chat state
+# Keep the workers.dev subdomain enabled — it provides the stable HTTPS URL
+# used for Telegram webhook registration (GET /set-webhook).
+workers_dev = true
+
+# D1 Database Binding for sessions, email_bindings, inbox, and per-chat state
+# NOTE: database_id is rewritten automatically by scripts/bootstrap.sh the
+# first time it runs against a NEW Cloudflare account (it creates the
+# "tempmail-db" database if it does not exist). The id below is a stale
+# placeholder from the old account and MUST be replaced before first deploy.
 [[d1_databases]]
 binding = "DB"
 database_name = "tempmail-db"
 database_id = "d4bb85dc-568f-40ef-a7c2-7605902b07de"
+migrations_dir = "migrations"
 
-# Environment Variables
+# Environment Variables (plain vars — safe to commit; this IS the source of truth)
+#
+# SECURITY: BOT_TOKEN is intentionally NOT a plain var. It is a Worker SECRET,
+# set exactly once via `wrangler secret put BOT_TOKEN` (scripts/bootstrap.sh
+# does this). NEVER add BOT_TOKEN to [vars]: deploying a placeholder here
+# would overwrite the real secret and silently break the bot (every Telegram
+# API call would 401) even though the deploy itself succeeds.
 [vars]
-BOT_TOKEN = "YOUR_TELEGRAM_BOT_TOKEN" # Replace with your Telegram Bot Token from @BotFather
-TELEGRAM_USER_ID = ""                # Optional: legacy single-admin gate. Leave empty to allow every chat_id when MULTI_USER is off.
-MULTI_USER = "true"                  # Set to "true" to open the bot to every Telegram user (each chat keeps its own session, inbox, and 50-token archive). Set to "false" to fall back to the TELEGRAM_USER_ID gate.
-DOMAIN = "yourdomain.com"             # Replace with your custom domain configured in Cloudflare Email Routing
+DOMAIN = "yourdomain.com" # PLACEHOLDER — set to the real domain configured with Cloudflare Email Routing BEFORE running scripts/bootstrap.sh
+TELEGRAM_USER_ID = ""     # Optional: legacy single-admin gate. Leave empty to allow every chat_id when MULTI_USER is off.
+MULTI_USER = "true"       # Set to "true" to open the bot to every Telegram user (each chat keeps its own session, inbox, and 50-token archive). Set to "false" to fall back to the TELEGRAM_USER_ID gate.
