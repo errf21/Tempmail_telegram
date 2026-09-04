@@ -25,6 +25,6 @@ migrations_dir = "migrations"
 # would overwrite the real secret and silently break the bot (every Telegram
 # API call would 401) even though the deploy itself succeeds.
 [vars]
-DOMAIN = "yourdomain.com" # PLACEHOLDER — set to the real domain configured with Cloudflare Email Routing BEFORE running scripts/bootstrap.sh
+DOMAIN = "twenyonerrf.ir" # PLACEHOLDER — set to the real domain configured with Cloudflare Email Routing BEFORE running scripts/bootstrap.sh
 TELEGRAM_USER_ID = ""     # Optional: legacy single-admin gate. Leave empty to allow every chat_id when MULTI_USER is off.
 MULTI_USER = "true"       # Set to "true" to open the bot to every Telegram user (each chat keeps its own session, inbox, and 50-token archive). Set to "false" to fall back to the TELEGRAM_USER_ID gate.
