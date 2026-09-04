@@ -133,6 +133,19 @@ async function d1Query(accountId, dbId, sqlOrBody) {
   });
 }
 
+// Schema-aware reconciliation: an ALTER TABLE ... ADD COLUMN statement from a
+// not-yet-recorded migration is a no-op if the exact column already exists
+// (e.g. DB schema applied manually before d1_migrations caught up).
+const ALTER_ADD_RE =
+  /^ALTER\s+TABLE\s+(?:"([^"]+)"|`([^`]+)`|\[([^\]]+)\]|([A-Za-z_][\w$]*))\s+ADD\s+COLUMN\s+(?:"([^"]+)"|`([^`]+)`|\[([^\]]+)\]|([A-Za-z_][\w$]*))/i;
+
+async function columnExists(accountId, dbId, table, column) {
+  const info = await d1Query(accountId, dbId, `PRAGMA table_info(${table})`);
+  return info.result[0].results.some(
+    (c) => c.name.toLowerCase() === column.toLowerCase()
+  );
+}
+
 async function cmdMigrate(accountId, dbId) {
   const dir = join(ROOT, "migrations");
   const files = readdirSync(dir)
@@ -160,13 +173,25 @@ async function cmdMigrate(accountId, dbId) {
       continue;
     }
     const statements = splitStatements(readFileSync(join(dir, file), "utf8"));
+    let skipped = 0;
     for (const stmt of statements) {
+      const alter = stmt.match(ALTER_ADD_RE);
+      if (alter) {
+        const table = alter[1] || alter[2] || alter[3] || alter[4];
+        const column = alter[5] || alter[6] || alter[7] || alter[8];
+        if (await columnExists(accountId, dbId, table, column)) {
+          console.log(`~ ${file}: skipped ALTER TABLE ${table} ADD COLUMN ${column} (column already exists)`);
+          skipped++;
+          continue;
+        }
+      }
       await d1Query(accountId, dbId, stmt);
     }
     await d1Query(accountId, dbId, {
       sql: "INSERT INTO d1_migrations (name) VALUES (?1)",
       params: [file],
-    });    console.log(`+ ${file} (${statements.length} statements)`);
+    });
+    console.log(`+ ${file} (${statements.length} statements, ${skipped} reconciled)`);
     ran++;
   }
   console.log(ran === 0 ? "migrations: up to date" : `migrations: applied ${ran}`);
