@@ -740,6 +740,14 @@ export default {
       }
     }
 
+    if (isWebApiPath(url.pathname)) {
+      return await handleWebApi(request, env, url);
+    }
+
+    if (request.method === "GET" && isWebAppPath(url.pathname)) {
+      return await serveWebApp(request, env, url);
+    }
+
     return new Response("Not Found", { status: 404 });
   },
 
@@ -3948,4 +3956,537 @@ function escapeAttribute(str) {
     .replace(/'/g, "&#39;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;");
+}
+
+/* ==========================================================================
+   WEB APP + TELEGRAM MINI APP API (/api/v1/*) and /app entry point
+   --------------------------------------------------------------------------
+   ADDITIVE SECTION — nothing above this block was modified for the Web App.
+   All bot behavior (Telegram Bot, email(), handleMessage(),
+   handleCallbackQuery(), token logic, D1 schema, extractFast(),
+   parseEmailBody(), OTP/link extraction, inbox storage, restore/archive/
+   purge, bot i18n, deploy/webhook) is byte-identical to before.
+
+   Design constraints honored here:
+   - No new D1 table, no migration. Auth state is STATELESS: session
+     tokens are HMAC-SHA256 signed with BOT_TOKEN (server secret, never
+     sent to the client) and verified on every request. No server-side
+     session storage is needed, so the LOCKED schema is untouched.
+   - Ownership is always resolved server-side: the chat_id comes from the
+     verified session token (web) or the verified Telegram initData
+     (Mini App) — never from a client-supplied chat_id. Every inbox
+     query is scoped to the session's own email via the existing
+     db.* helpers.
+   - recovery_token is returned ONLY at issuance moments (provision,
+     create, restore) — exactly like the bot shows the token once after
+     generating. It is NEVER echoed by /me or inbox endpoints.
+   - Aparat semantics are preserved by delegating to the UNCHANGED
+     isAparatEmail() + linkLabelFor(): a verification link is always a
+     real URL action; for Aparat the label is "✅ تایید حساب".
+   ========================================================================== */
+
+const WEB_SESSION_TTL_SEC = 30 * 24 * 3600;   // stateless session token lifetime
+const WEBAPP_AUTH_MAX_AGE_SEC = 24 * 3600;    // Telegram initData freshness
+const WEB_API_MAX_BODY = 16 * 1024;           // auth/settings JSON bodies are tiny
+const WEB_DETAIL_BODY_LIMIT = 8000;           // full-view text cap for the API
+
+// ---- routing predicates (pure; also used by tests) ------------------------
+
+function isWebApiPath(pathname) {
+  return pathname === "/api/v1/health" || pathname.startsWith("/api/v1/");
+}
+
+function isWebAppPath(pathname) {
+  // Bare "/app" entry only. "/app/*" files are served directly by the
+  // Static Assets binding; the worker never needs to rewrite them, so
+  // no SPA fallback exists that could swallow /api/* or /webhook.
+  return pathname === "/app" || pathname === "/app/";
+}
+
+// ---- tiny crypto helpers (Web Crypto; no Buffer — Workers compatible) -----
+
+function webB64UrlEncode(bytes) {
+  let bin = "";
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    bin += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+  }
+  return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+function webB64UrlDecode(str) {
+  let s = String(str || "").replace(/-/g, "+").replace(/_/g, "/");
+  while (s.length % 4) s += "=";
+  const bin = atob(s);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+async function webHmacSha256(keyBytes, msgString) {
+  const key = await crypto.subtle.importKey(
+    "raw", keyBytes, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]
+  );
+  const sig = await crypto.subtle.sign(
+    "HMAC", key, new TextEncoder().encode(msgString)
+  );
+  return new Uint8Array(sig);
+}
+
+function webHex(bytes) {
+  let out = "";
+  for (let i = 0; i < bytes.length; i++) {
+    out += bytes[i].toString(16).padStart(2, "0");
+  }
+  return out;
+}
+
+function webSafeEqual(a, b) {
+  const sa = String(a || "");
+  const sb = String(b || "");
+  if (sa.length !== sb.length) return false;
+  let diff = 0;
+  for (let i = 0; i < sa.length; i++) diff |= sa.charCodeAt(i) ^ sb.charCodeAt(i);
+  return diff === 0;
+}
+
+// ---- Telegram Mini App initData validation --------------------------------
+// Per https://core.telegram.org/bots/webapps#validating-data-received-via-the-mini-app:
+//   secret_key = HMAC_SHA256(key="WebAppData", msg=BOT_TOKEN)
+//   check      = HMAC_SHA256(key=secret_key, msg=data_check_string)
+// data_check_string = "\n"-joined "key=<value>" pairs (excluding "hash"),
+// sorted alphabetically by key. The hex digest must equal "hash".
+// Returns { ok:true, chatId, userId } or { ok:false, reason }.
+// Never logs the raw initData.
+
+async function validateTelegramInitData(initData, botToken) {
+  try {
+    if (typeof initData !== "string" || !initData || initData.length > 8192) {
+      return { ok: false, reason: "bad_init_data" };
+    }
+    if (!botToken || botToken === "YOUR_TELEGRAM_BOT_TOKEN") {
+      return { ok: false, reason: "not_configured" };
+    }
+    const params = new URLSearchParams(initData);
+    const hash = params.get("hash");
+    if (!hash) return { ok: false, reason: "missing_hash" };
+    const pairs = [];
+    for (const [k, v] of params) {
+      if (k === "hash" || k === "signature") continue;
+      pairs.push([k, v]);
+    }
+    if (pairs.length === 0) return { ok: false, reason: "empty_data" };
+    pairs.sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
+    const dataCheckString = pairs.map(([k, v]) => k + "=" + v).join("\n");
+    const secretKey = await webHmacSha256(
+      new TextEncoder().encode("WebAppData"), String(botToken)
+    );
+    const checkBytes = await webHmacSha256(secretKey, dataCheckString);
+    if (!webSafeEqual(webHex(checkBytes), String(hash).toLowerCase())) {
+      return { ok: false, reason: "bad_hash" };
+    }
+    const authDate = Number(params.get("auth_date"));
+    if (!Number.isFinite(authDate)) return { ok: false, reason: "bad_auth_date" };
+    if (Math.abs(Date.now() / 1000 - authDate) > WEBAPP_AUTH_MAX_AGE_SEC) {
+      return { ok: false, reason: "expired" };
+    }
+    let user = null;
+    try { user = JSON.parse(params.get("user") || "null"); } catch (e) { user = null; }
+    if (!user || typeof user.id === "undefined" || user.id === null) {
+      return { ok: false, reason: "bad_user" };
+    }
+    const userId = String(user.id);
+    if (!/^\d+$/.test(userId)) return { ok: false, reason: "bad_user" };
+    // For a private Mini App the chat identity IS the Telegram user id —
+    // the same id the bot sees as message.chat.id in DMs.
+    return { ok: true, chatId: userId, userId };
+  } catch (e) {
+    return { ok: false, reason: "exception" };
+  }
+}
+
+// ---- stateless session tokens (HMAC-signed, no D1 storage) ----------------
+// Format: "v1.<base64url(JSON {v,cid,exp})>.<hex HMAC_SHA256(BOT_TOKEN, payload)>"
+
+async function issueSessionToken(env, chatId, ttlSec) {
+  const ttl = (typeof ttlSec === "number" && ttlSec > 0) ? ttlSec : WEB_SESSION_TTL_SEC;
+  const payload = { v: 1, cid: String(chatId), exp: Math.floor(Date.now() / 1000) + ttl };
+  const payloadB64 = webB64UrlEncode(new TextEncoder().encode(JSON.stringify(payload)));
+  const body = "v1." + payloadB64;
+  const sig = webHex(await webHmacSha256(new TextEncoder().encode(String(env.BOT_TOKEN || "")), body));
+  return body + "." + sig;
+}
+
+async function verifySessionToken(env, token) {
+  try {
+    if (typeof token !== "string") return null;
+    const parts = token.split(".");
+    if (parts.length !== 3 || parts[0] !== "v1" || !parts[1] || !parts[2]) return null;
+    if (!env.BOT_TOKEN || env.BOT_TOKEN === "YOUR_TELEGRAM_BOT_TOKEN") return null;
+    const body = parts[0] + "." + parts[1];
+    const expect = webHex(await webHmacSha256(new TextEncoder().encode(String(env.BOT_TOKEN)), body));
+    if (!webSafeEqual(expect, parts[2].toLowerCase())) return null;
+    const payload = JSON.parse(new TextDecoder().decode(webB64UrlDecode(parts[1])));
+    if (!payload || payload.v !== 1 || !payload.cid) return null;
+    if (typeof payload.exp !== "number" || payload.exp <= Math.floor(Date.now() / 1000)) return null;
+    return String(payload.cid);
+  } catch (e) {
+    return null;
+  }
+}
+
+// ---- HTTP plumbing ---------------------------------------------------------
+
+function apiJson(obj, status, extraHeaders) {
+  const headers = {
+    "Content-Type": "application/json; charset=utf-8",
+    "Cache-Control": "no-store",
+    "X-Content-Type-Options": "nosniff",
+  };
+  if (extraHeaders) {
+    for (const k of Object.keys(extraHeaders)) headers[k] = extraHeaders[k];
+  }
+  return new Response(JSON.stringify(obj), { status: status || 200, headers });
+}
+
+function apiErr(error, status) {
+  return apiJson({ error }, status || 400);
+}
+
+function sessionCookieHeader(token) {
+  // HttpOnly + Secure + SameSite=Lax: the browser sends it automatically on
+  // same-origin /api calls; the Authorization header remains the primary
+  // transport (works even where Secure cookies are unavailable, e.g. http).
+  return `tm_session=${token}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=${WEB_SESSION_TTL_SEC}`;
+}
+
+function getBearerToken(request) {
+  try {
+    const h = request.headers.get("authorization") || "";
+    const m = /^Bearer\s+(\S+)$/i.exec(h.trim());
+    if (m) return m[1];
+    const cookie = request.headers.get("cookie") || "";
+    const cm = /(?:^|;\s*)tm_session=([^;]+)/.exec(cookie);
+    if (cm) return decodeURIComponent(cm[1].trim());
+  } catch (e) { /* fall through */ }
+  return "";
+}
+
+async function readJsonBody(request) {
+  try {
+    const text = await request.text();
+    if (!text) return {};
+    if (text.length > WEB_API_MAX_BODY) return { __tooLarge: true };
+    return JSON.parse(text);
+  } catch (e) {
+    return { __invalid: true };
+  }
+}
+
+// Resolve the caller's identity server-side. Returns { chatId, session }
+// or null (caller gets 401). The chat_id NEVER comes from the client.
+async function requireWebSession(request, env) {
+  const token = getBearerToken(request);
+  if (!token) return null;
+  const chatId = await verifySessionToken(env, token);
+  if (!chatId) return null;
+  let session = null;
+  try { session = await db.getSession(env, chatId); } catch (e) { session = null; }
+  if (!session) return null;
+  return { chatId: String(chatId), session };
+}
+
+function webNowStr() {
+  return new Date().toLocaleTimeString("fa-IR", { timeZone: "Asia/Tehran" }) + " - " + new Date().toISOString().split("T")[0];
+}
+
+// ---- email provisioning (mirrors confirm_generate_yes, bot path untouched) -
+
+const WEB_EMAIL_ADJECTIVES = ["shadow", "skyline", "quantum", "bluefire", "neon", "cyber", "stellar", "nova", "cosmic", "apex", "swift", "silent", "frost", "solar", "dark", "light"];
+const WEB_EMAIL_NOUNS = ["pulse", "echo", "vertex", "orbit", "matrix", "core", "storm", "wave", "spark", "ghost", "rider", "hawk", "wolf", "fox", "tiger", "dragon"];
+
+async function apiCreateNewEmail(env, chatId, lang) {
+  const langVal = (lang === "en") ? "en" : "fa";
+  // Same pre-steps as confirm_generate_yes: archive the old token
+  // (best-effort) and clear the old inbox before overwriting.
+  const userData = await db.getSession(env, chatId);
+  if (userData && userData.email) {
+    if (userData.recoveryToken) {
+      try {
+        await db.archiveToken(env, chatId, userData.email, userData.recoveryToken, langVal, userData.createdAt);
+      } catch (e) { /* best-effort, must not abort creation */ }
+    }
+    await db.clearInbox(env, userData.email);
+  }
+  const prefixPool = [
+    () => WEB_EMAIL_ADJECTIVES[Math.floor(Math.random() * WEB_EMAIL_ADJECTIVES.length)] + (Math.floor(Math.random() * 90) + 10),
+    () => WEB_EMAIL_ADJECTIVES[Math.floor(Math.random() * WEB_EMAIL_ADJECTIVES.length)] + WEB_EMAIL_NOUNS[Math.floor(Math.random() * WEB_EMAIL_NOUNS.length)] + (Math.floor(Math.random() * 90) + 10)
+  ];
+  const randomPrefix = prefixPool[Math.floor(Math.random() * prefixPool.length)]();
+  const domain = env.DOMAIN ? env.DOMAIN.toLowerCase().trim() : "temp.com";
+  const newEmail = `${randomPrefix}@${domain}`;
+  const nowStr = webNowStr();
+  let recoveryToken = generateRecoveryToken();
+  let attempts = 0;
+  while (await db.tokenInUse(env, recoveryToken)) {
+    recoveryToken = generateRecoveryToken();
+    if (++attempts > 16) break;
+  }
+  await db.upsertSession(env, chatId, newEmail, nowStr, recoveryToken, langVal);
+  return { email: newEmail, createdAt: nowStr, recoveryToken };
+}
+
+// ---- login via recovery token (mirrors handleMessage restore reactivation) -
+// Possession of the unguessable token IS the credential (same model as the
+// bot showing the token once). Live tokens and archived tokens both work;
+// archived ones reactivate their (chatId, email) pair via upsertSession,
+// exactly like the bot's restore path (including deleteBindingByEmail of a
+// replaced address).
+
+async function apiLoginWithRecoveryToken(env, token) {
+  const clean = String(token || "").trim();
+  if (!isValidRecoveryToken(clean)) return { error: "invalid_token", status: 400 };
+  let tokenRecord = await db.getSessionByToken(env, clean);
+  if (!tokenRecord) tokenRecord = await db.getArchivedToken(env, clean);
+  if (!tokenRecord || !tokenRecord.email) return { error: "not_found", status: 404 };
+  const chatId = String(tokenRecord.chatId);
+  const existing = await db.getSession(env, chatId);
+  if (existing && existing.email && existing.email !== tokenRecord.email) {
+    await db.deleteBindingByEmail(env, existing.email);
+  }
+  const createdAt = tokenRecord.createdAt || webNowStr();
+  const langVal = (tokenRecord.lang === "en") ? "en" : "fa";
+  await db.upsertSession(env, chatId, tokenRecord.email, createdAt, clean, langVal);
+  return { chatId, email: tokenRecord.email, createdAt, lang: langVal };
+}
+
+// ---- inbox shaping (raw MIME never leaves the server) ----------------------
+// Aparat semantics delegate to the UNCHANGED isAparatEmail()/linkLabelFor():
+// the activation link is always a real URL action; for Aparat the label is
+// "✅ تایید حساب" — the same concept as the bot's URL button.
+
+function apiActivationInfo(item, lang) {
+  const t = i18n[lang] || i18n.fa;
+  const link = (item && item.activationLink) || "";
+  if (!link) return { activationLink: "", activationLabel: "", isAparat: false, hasLink: false };
+  const aparat = isAparatEmail(item.from, link, item.subject);
+  return {
+    activationLink: link,
+    activationLabel: aparat ? "✅ تایید حساب" : linkLabelFor(link, t),
+    isAparat: !!aparat,
+    hasLink: true,
+  };
+}
+
+function apiPublicInboxItem(item, lang) {
+  const info = apiActivationInfo(item, lang);
+  const links = Array.isArray(item.links)
+    ? item.links.filter((u) => typeof u === "string").slice(0, 3)
+    : [];
+  return {
+    id: item.id,
+    ts: item.ts,
+    sender: item.from || "",
+    subject: item.subject || "",
+    date: item.date || "",
+    preview: item.body || "",
+    otpCode: item.otpCode || "",
+    hasOtp: !!(item.otpCode),
+    hasLink: info.hasLink,
+    isAparat: info.isAparat,
+    activationLink: info.activationLink,
+    activationLabel: info.activationLabel,
+    links,
+  };
+}
+
+async function apiEmailDetail(env, email, id, lang) {
+  const list = await db.listInbox(env, email);
+  const item = list.find((r) => String(r.id) === String(id));
+  if (!item) return null;
+  // Body: stored preview when present; otherwise lazy-parse the saved raw
+  // MIME exactly like renderFullEmail() does (parseEmailBody has its own
+  // MAX_PARSE_BYTES guard and falls back to extractFast on huge inputs).
+  let bodyText = item.body || "";
+  let otpCode = item.otpCode || "";
+  let activationLink = item.activationLink || "";
+  let links = Array.isArray(item.links) ? item.links.slice(0, 3) : [];
+  if ((!bodyText || !otpCode || !activationLink) && item.raw) {
+    try {
+      const parsed = parseEmailBody(item.raw);
+      if (!bodyText && parsed && parsed.text) bodyText = parsed.text;
+      if (parsed && Array.isArray(parsed.links) && links.length === 0) {
+        links = parsed.links.filter((u) => typeof u === "string").slice(0, 3);
+      }
+    } catch (e) { /* keep stored values */ }
+    if (!otpCode || !activationLink) {
+      try {
+        const fast = extractFast(item.raw);
+        if (!otpCode && fast.otpCode) otpCode = fast.otpCode;
+        if (!activationLink && fast.activationLink) activationLink = fast.activationLink;
+      } catch (e) { /* keep stored values */ }
+    }
+    // Backfill legacy rows (written before migration 0003) so later reads
+    // and the bot's own full-view/collapse see the same values.
+    if ((otpCode !== (item.otpCode || "")) || (activationLink !== (item.activationLink || ""))) {
+      try { await db.updateInboxAction(env, email, item.id, otpCode, activationLink); } catch (e) { /* best-effort */ }
+    }
+  }
+  if (bodyText.length > WEB_DETAIL_BODY_LIMIT) {
+    bodyText = bodyText.substring(0, WEB_DETAIL_BODY_LIMIT) + "\n\n(...truncated)";
+  }
+  const shaped = apiPublicInboxItem({
+    id: item.id, ts: item.ts, from: item.from, subject: item.subject,
+    date: item.date, body: "", links, otpCode, activationLink,
+  }, lang);
+  shaped.bodyText = bodyText;
+  return shaped;
+}
+
+// ---- /app entry (static files themselves come from the Assets binding) -----
+
+async function serveWebApp(request, env, url) {
+  try {
+    if (env && env.ASSETS && typeof env.ASSETS.fetch === "function") {
+      return await env.ASSETS.fetch(new Request(url.origin + "/app/index.html", request));
+    }
+  } catch (e) { /* fall through to hint */ }
+  return new Response("Web App assets are not configured on this Worker.", {
+    status: 503,
+    headers: { "Content-Type": "text/plain; charset=utf-8" },
+  });
+}
+
+// ---- main API router --------------------------------------------------------
+
+async function handleWebApi(request, env, url) {
+  try {
+    const pathname = url.pathname;
+
+    if (request.method === "GET" && pathname === "/api/v1/health") {
+      return apiJson({ ok: true, domain: env.DOMAIN || "", time: new Date().toISOString() });
+    }
+
+    // -- AUTH: Telegram Mini App -------------------------------------------
+    if (pathname === "/api/v1/auth/telegram") {
+      if (request.method !== "POST") return apiErr("method_not_allowed", 405);
+      const body = await readJsonBody(request);
+      if (body.__invalid || body.__tooLarge || typeof body.initData !== "string") {
+        return apiErr("invalid_request", 400);
+      }
+      const check = await validateTelegramInitData(body.initData, env.BOT_TOKEN);
+      if (!check.ok) {
+        return apiErr(check.reason === "expired" ? "expired" : "invalid_init_data", 401);
+      }
+      if (!isPublicAccess(env, check.userId)) return apiErr("forbidden", 403);
+      // The Mini App never provisions: the bot is the single authority
+      // that creates emails. A Telegram user without a bot session gets
+      // no_session and the frontend guides them to the bot.
+      const session = await db.getSession(env, check.chatId);
+      if (!session) return apiErr("no_session", 404);
+      const token = await issueSessionToken(env, check.chatId);
+      const user = { email: session.email, createdAt: session.createdAt, lang: session.lang === "en" ? "en" : "fa" };
+      return apiJson({ sessionToken: token, user }, 200, { "Set-Cookie": sessionCookieHeader(token) });
+    }
+
+    // -- AUTH: recovery token (plain browser) -------------------------------
+    if (pathname === "/api/v1/auth/token") {
+      if (request.method !== "POST") return apiErr("method_not_allowed", 405);
+      const body = await readJsonBody(request);
+      if (body.__invalid || body.__tooLarge) return apiErr("invalid_request", 400);
+      const login = await apiLoginWithRecoveryToken(env, body.token);
+      if (login.error) return apiErr(login.error, login.status || 400);
+      const token = await issueSessionToken(env, login.chatId);
+      return apiJson({
+        sessionToken: token,
+        user: { email: login.email, createdAt: login.createdAt, lang: login.lang },
+      }, 200, { "Set-Cookie": sessionCookieHeader(token) });
+    }
+
+    // -- everything below requires a verified session ------------------------
+    const authed = await requireWebSession(request, env);
+    if (!authed) return apiErr("unauthorized", 401);
+    const { chatId, session } = authed;
+    const lang = session.lang === "en" ? "en" : "fa";
+
+    if (pathname === "/api/v1/me") {
+      if (request.method !== "GET") return apiErr("method_not_allowed", 405);
+      const items = await db.listInbox(env, session.email);
+      return apiJson({
+        email: session.email,
+        createdAt: session.createdAt,
+        lang,
+        inboxCount: items.length,
+      });
+    }
+
+    if (pathname === "/api/v1/emails/current") {
+      if (request.method !== "GET") return apiErr("method_not_allowed", 405);
+      return apiJson({ email: session.email || null, createdAt: session.createdAt || null });
+    }
+
+    if (pathname === "/api/v1/emails") {
+      if (request.method !== "POST") return apiErr("method_not_allowed", 405);
+      const created = await apiCreateNewEmail(env, chatId, lang);
+      return apiJson({
+        email: created.email,
+        createdAt: created.createdAt,
+        recoveryToken: created.recoveryToken, // issuance only
+      });
+    }
+
+    if (pathname === "/api/v1/emails/restore") {
+      if (request.method !== "POST") return apiErr("method_not_allowed", 405);
+      const body = await readJsonBody(request);
+      if (body.__invalid || body.__tooLarge) return apiErr("invalid_request", 400);
+      const login = await apiLoginWithRecoveryToken(env, body.token);
+      if (login.error) return apiErr(login.error, login.status || 400);
+      // Bot parity (restoreWrongOwner): an authenticated caller may only
+      // restore a token that belongs to their OWN chat. Switching identity
+      // to another chat's token is refused even when the token is valid.
+      if (String(login.chatId) !== String(chatId)) return apiErr("wrong_owner", 403);
+      const token = await issueSessionToken(env, login.chatId);
+      return apiJson({
+        sessionToken: token,
+        email: login.email,
+        createdAt: login.createdAt,
+      }, 200, { "Set-Cookie": sessionCookieHeader(token) });
+    }
+
+    if (pathname === "/api/v1/inbox") {
+      if (request.method !== "GET") return apiErr("method_not_allowed", 405);
+      let limit = parseInt(url.searchParams.get("limit") || "20", 10);
+      if (!Number.isFinite(limit)) limit = 20;
+      limit = Math.max(1, Math.min(20, limit));
+      const items = await db.listInbox(env, session.email);
+      return apiJson({ items: items.slice(0, limit).map((it) => apiPublicInboxItem(it, lang)) });
+    }
+
+    if (pathname.startsWith("/api/v1/inbox/")) {
+      if (request.method !== "GET") return apiErr("method_not_allowed", 405);
+      const id = decodeURIComponent(pathname.substring("/api/v1/inbox/".length).split("/")[0] || "");
+      if (!id) return apiErr("invalid_request", 400);
+      const detail = await apiEmailDetail(env, session.email, id, lang);
+      if (!detail) return apiErr("not_found", 404);
+      return apiJson(detail);
+    }
+
+    if (pathname === "/api/v1/settings/language") {
+      if (request.method === "GET") return apiJson({ lang });
+      if (request.method === "PUT") {
+        const body = await readJsonBody(request);
+        if (body.__invalid || body.__tooLarge) return apiErr("invalid_request", 400);
+        const next = String(body.lang || "").toLowerCase();
+        if (next !== "fa" && next !== "en") return apiErr("invalid_lang", 400);
+        await db.setLang(env, chatId, next);
+        return apiJson({ lang: next });
+      }
+      return apiErr("method_not_allowed", 405);
+    }
+
+    return apiErr("not_found", 404);
+  } catch (e) {
+    // Never leak internals, secrets, or stacks to API clients.
+    return apiErr("internal_error", 500);
+  }
 }

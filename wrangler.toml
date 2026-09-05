@@ -17,6 +17,15 @@ database_name = "tempmail-db"
 database_id = "d4bb85dc-568f-40ef-a7c2-7605902b07de"
 migrations_dir = "migrations"
 
+# Static Assets for the shared Web App + Telegram Mini App frontend
+# (public/app/*). Only exact file matches are served by the CDN edge;
+# there is NO SPA fallback, so /api/v1/*, /webhook, /set-webhook and /
+# always fall through to the Worker fetch() handler above. The bare
+# "/app" entry is served by serveWebApp() in _worker.js via this binding.
+[assets]
+directory = "public"
+binding = "ASSETS"
+
 # Environment Variables (plain vars — safe to commit; this IS the source of truth)
 #
 # SECURITY: BOT_TOKEN is intentionally NOT a plain var. It is a Worker SECRET,

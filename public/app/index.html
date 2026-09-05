@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl" data-theme="auto">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#0e1621" />
+  <meta name="description" content="Temporary Email — ایمیل موقت سریع و امن" />
+  <title>TempMail — ایمیل موقت</title>
+  <link rel="stylesheet" href="./styles.css" />
+  <script src="https://telegram.org/js/telegram-web-app.js" defer></script>
+  <script src="./app.js" defer></script>
+</head>
+<body>
+  <div id="app" class="app">
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-logo" aria-hidden="true">📮</span>
+        <span class="brand-name" data-i18n="brandName">تمپ‌میل</span>
+      </div>
+      <div class="topbar-actions">
+        <button id="btn-theme" class="icon-btn" type="button" aria-label="theme">🌙</button>
+        <button id="btn-lang" class="icon-btn lang-btn" type="button">EN</button>
+      </div>
+    </header>
+
+    <main class="main">
+      <!-- Global status line (loading / error) -->
+      <div id="status" class="status hidden" role="status"></div>
+
+      <!-- ============ LOGIN (browser mode) ============ -->
+      <section id="view-login" class="view hidden">
+        <div class="card hero">
+          <div class="hero-logo" aria-hidden="true">💎</div>
+          <h1 data-i18n="loginTitle">ایمیل موقت شما</h1>
+          <p class="muted" data-i18n="loginDesc">بدون ثبت‌نام، یک آدرس ایمیل موقت بسازید و کدهای تایید را فوری دریافت کنید.</p>
+        </div>
+        <div class="card">
+          <label class="field-label" for="input-token" data-i18n="restoreTokenLabel">توکن بازگردانی</label>
+          <input id="input-token" class="text-input mono" type="text" inputmode="latin"
+                 placeholder="tmp_xxxxxx" autocomplete="off" spellcheck="false" dir="ltr" />
+          <p class="hint" data-i18n="loginHint">توکن را از ربات تلگرام گرفته‌اید؟ آن را وارد کنید تا به همان ایمیل وصل شوید.</p>
+          <button id="btn-login" class="btn primary block" type="button" data-i18n="btnLogin">ورود با توکن</button>
+          <a id="btn-open-bot" class="btn primary block hidden" target="_blank" rel="noopener" data-i18n="btnOpenBot">باز کردن ربات تلگرام</a>
+          <div class="divider"><span data-i18n="or">یا</span></div>
+          <button id="btn-login-help" class="btn ghost block" type="button" data-i18n="btnNoToken">هنوز ایمیلی ندارم — راهنما</button>
+          <p id="login-help" class="hint hidden" data-i18n="loginHelpText">در ربات تلگرام دکمه «ساخت ایمیل جدید» را بزنید؛ توکن نمایش داده می‌شود. اگر از داخل تلگرام این صفحه را باز کرده‌اید، ورود خودکار انجام می‌شود.</p>
+        </div>
+      </section>
+
+      <!-- ============ MAIN (dashboard + inbox) ============ -->
+      <section id="view-main" class="view hidden">
+        <div class="card email-card">
+          <div class="email-label" data-i18n="yourEmail">آدرس ایمیل شما</div>
+          <div class="email-row">
+            <code id="current-email" class="email-addr" dir="ltr">…</code>
+          </div>
+          <div id="email-meta" class="meta muted"></div>
+          <div class="btn-grid">
+            <button id="btn-copy-email" class="btn secondary" type="button">📋 <span data-i18n="btnCopy">کپی</span></button>
+            <button id="btn-refresh" class="btn secondary" type="button">🔄 <span data-i18n="btnRefresh">به‌روزرسانی</span></button>
+            <button id="btn-new" class="btn primary" type="button">🎲 <span data-i18n="btnNew">ایمیل جدید</span></button>
+            <button id="btn-restore" class="btn ghost" type="button">♻️ <span data-i18n="btnRestore">بازگردانی</span></button>
+          </div>
+          <div id="restore-box" class="restore-box hidden">
+            <input id="input-restore" class="text-input mono" type="text" inputmode="latin"
+                   placeholder="tmp_xxxxxx" autocomplete="off" spellcheck="false" dir="ltr" />
+            <div class="btn-row">
+              <button id="btn-do-restore" class="btn primary" type="button" data-i18n="btnDoRestore">بازیابی</button>
+              <button id="btn-cancel-restore" class="btn ghost" type="button" data-i18n="btnCancel">انصراف</button>
+            </div>
+          </div>
+          <div id="new-token-box" class="token-box hidden">
+            <div class="field-label" data-i18n="newTokenLabel">توکن ایمیل جدید — آن را نگه دارید:</div>
+            <code id="new-token" class="token-val" dir="ltr"></code>
+            <button id="btn-copy-new-token" class="btn secondary small" type="button">📋 <span data-i18n="btnCopy">کپی</span></button>
+          </div>
+        </div>
+
+        <div class="inbox-head">
+          <h2>📥 <span data-i18n="inbox">صندوق ورودی</span> <span id="inbox-count" class="count-badge">0</span></h2>
+          <button id="btn-logout" class="link-btn" type="button" data-i18n="btnLogout">خروج</button>
+        </div>
+        <div id="inbox-list" class="inbox-list"></div>
+        <div id="inbox-empty" class="card empty hidden">
+          <div class="empty-icon" aria-hidden="true">📭</div>
+          <p data-i18n="inboxEmpty">صندوق ورودی خالی است</p>
+          <p class="hint" data-i18n="inboxEmptyHint">ایمیل‌های دریافتی این آدرس اینجا نمایش داده می‌شوند.</p>
+        </div>
+      </section>
+
+      <!-- ============ DETAIL ============ -->
+      <section id="view-detail" class="view hidden">
+        <button id="btn-back" class="btn ghost small" type="button">→ <span data-i18n="btnBack">بازگشت</span></button>
+        <article class="card">
+          <div id="detail-service" class="detail-service"></div>
+          <h2 id="detail-subject" class="detail-subject"></h2>
+          <div class="meta-grid">
+            <div><span class="muted" data-i18n="from">فرستنده:</span> <code id="detail-from" class="mono" dir="auto"></code></div>
+            <div><span class="muted" data-i18n="date">تاریخ:</span> <span id="detail-date"></span></div>
+          </div>
+          <div id="detail-otp-box" class="otp-box hidden">
+            <div class="field-label" data-i18n="otpLabel">کد تایید:</div>
+            <div class="otp-row">
+              <code id="detail-otp" class="otp-val" dir="ltr"></code>
+              <button id="btn-copy-otp" class="btn secondary small" type="button">📋 <span data-i18n="btnCopy">کپی</span></button>
+            </div>
+          </div>
+          <div id="detail-link-box" class="link-box hidden">
+            <a id="detail-link" class="btn primary block" rel="noopener" target="_blank">🔗</a>
+            <div id="detail-links-extra"></div>
+          </div>
+          <h3 class="field-label" data-i18n="bodyLabel">متن پیام:</h3>
+          <pre id="detail-body" class="detail-body" dir="auto"></pre>
+          <div class="btn-row">
+            <button id="btn-copy-body" class="btn secondary small" type="button">📋 <span data-i18n="btnCopyBody">کپی متن</span></button>
+          </div>
+        </article>
+      </section>
+    </main>
+
+    <footer class="footer muted">
+      <span data-i18n="footer">تمپ‌میل — ایمیل موقت سریع و امن</span>
+    </footer>
+  </div>
+  <noscript><p style="padding:2rem;text-align:center">JavaScript is required / جاوااسکریپت لازم است.</p></noscript>
+</body>
+</html>
