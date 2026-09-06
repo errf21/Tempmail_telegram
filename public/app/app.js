@@ -133,10 +133,25 @@ async function copyText(txt) {
 }
 
 /* ---------------- Telegram WebApp ---------------- */
+/* initData is ALWAYS re-read live from window.Telegram.WebApp at send
+   time (getLiveInitData), never trusted from a stale snapshot: an empty
+   value refuses to POST (the server would answer 401 invalid_init_data
+   for ""). ready() is called before any read so the bridge is
+   initialized. A pageshow listener re-checks after bfcache restores,
+   which do not re-fire DOMContentLoaded. */
+function getLiveInitData() {
+  try {
+    const wa = window.Telegram && window.Telegram.WebApp;
+    const d = wa ? wa.initData : "";
+    return (typeof d === "string" && d.length > 0) ? d : "";
+  } catch (_) {
+    return "";
+  }
+}
 function initTelegram() {
   try {
     const wa = window.Telegram && window.Telegram.WebApp;
-    if (wa && typeof wa.initData === "string" && wa.initData.length > 0) {
+    if (wa && getLiveInitData().length > 0) {
       S.tg = wa; S.isTg = true;
       wa.ready();
       try { wa.expand(); } catch (_) {}
@@ -148,6 +163,22 @@ function initTelegram() {
     }
   } catch (_) {}
   return false;
+}
+/* Re-check initData when the page is restored from bfcache (stale
+   auth_date would otherwise fail server-side freshness). If we are in
+   the Mini App but initData is gone/empty, surface the reopen message
+   instead of POSTing an empty value. */
+function recheckTelegramInitData() {
+  if (!S.isTg) return;
+  if (!getLiveInitData()) {
+    setToken("");
+    status(t("errExpiredTg"), "error");
+  }
+}
+if (typeof window !== "undefined" && typeof window.addEventListener === "function") {
+  window.addEventListener("pageshow", (ev) => {
+    if (ev && ev.persisted) recheckTelegramInitData();
+  });
 }
 function applyTgTheme(wa) {
   try {
@@ -246,11 +277,20 @@ async function ensureWebSession() {
 }
 /* Mini App authentication with RAW initData (server verifies HMAC).
    Shared by boot() and the refreshAll() 401-recovery below so a rejected
-   session token triggers exactly one silent re-auth instead of a dead end. */
+   session token triggers exactly one silent re-auth instead of a dead end.
+   initData is re-read live on every call; an empty value never POSTs
+   (the server would answer 401 invalid_init_data for it). */
 async function miniAuth() {
+  const live = getLiveInitData();
+  if (!live) {
+    const err = new Error("empty_init_data");
+    err.code = "empty_init_data";
+    err.status = 0;
+    throw err;
+  }
   const r = await api("/api/v1/auth/telegram", {
     method: "POST",
-    body: { initData: S.tg.initData },
+    body: { initData: live },
   });
   setToken(r.sessionToken);
   S.me = r.user;
@@ -266,7 +306,7 @@ function miniAuthError(e) {
     showNoSession();
     return;
   }
-  if (e.code === "expired") status(t("errExpiredTg"), "error");
+  if (e.code === "expired" || e.code === "empty_init_data") status(t("errExpiredTg"), "error");
   else if (e.code === "forbidden") status(t("errForbiddenTg"), "error");
   else if (e.code === "invalid_init_data") status(t("errInvalidTg"), "error");
   else status(t("errNetwork"), "error");
@@ -442,6 +482,18 @@ function renderItem(it) {
   if (it.hasLink) right.appendChild(el("span", "badge", "🔗"));
   row.appendChild(right);
   b.appendChild(row);
+  // Compact verification action (e.g. Aparat "✅ تایید حساب"): short label
+  // only, gated by the existing HTTPS check. The long URL lives in href
+  // (never as visible text) so it cannot stretch the layout. textContent
+  // only — no innerHTML, no arbitrary email HTML.
+  if (it.activationLink && isHttpUrl(it.activationLink)) {
+    const a = el("a", "inbox-action", it.activationLabel || ("🔗 " + t("openLink")));
+    a.href = it.activationLink;
+    a.target = "_blank";
+    a.rel = "noopener";
+    a.addEventListener("click", (ev) => ev.stopPropagation());
+    b.appendChild(a);
+  }
   b.addEventListener("click", () => openDetail(it.id));
   return b;
 }

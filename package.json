@@ -15,7 +15,8 @@
     "test:tokens": "node tests/email_tokens_test.mjs",
     "test:api": "node tests/api_test.mjs",
     "test:auth": "node tests/auth_flow_test.mjs",
-    "test:all": "node tests/run.mjs && node tests/d1_test.mjs && node tests/view_test.mjs && node tests/format_test.mjs && node tests/notification_test.mjs && node tests/header_stripping_test.mjs && node tests/collapse_test.mjs && node tests/link_extraction_test.mjs && node tests/email_tokens_test.mjs && node tests/api_test.mjs && node tests/auth_flow_test.mjs",
+    "test:inbox": "node tests/inbox_ui_test.mjs",
+    "test:all": "node tests/run.mjs && node tests/d1_test.mjs && node tests/view_test.mjs && node tests/format_test.mjs && node tests/notification_test.mjs && node tests/header_stripping_test.mjs && node tests/collapse_test.mjs && node tests/link_extraction_test.mjs && node tests/email_tokens_test.mjs && node tests/api_test.mjs && node tests/auth_flow_test.mjs && node tests/inbox_ui_test.mjs",
     "migrate": "wrangler d1 migrations apply DB --remote",
     "deploy": "bash scripts/deploy.sh"
   },

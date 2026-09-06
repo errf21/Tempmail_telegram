@@ -330,14 +330,24 @@ check("miniapp: web_app button in dashboard keyboard",
   workerSrc.includes("text: t.btnMiniApp, web_app: { url: MINI_APP_URL }"));
 const dashFa = mod.getDashboardPayload({ email: "u@twenyonerrf.ir", createdAt: "c", recoveryToken: "tmp_aaaa11" }, "fa");
 const dashEn = mod.getDashboardPayload(null, "en");
-const firstRowFa = dashFa.keyboard.inline_keyboard[0][0];
-const firstRowEn = dashEn.keyboard.inline_keyboard[0][0];
-check("miniapp: dashboard first row is web_app button (fa, with email)",
-  firstRowFa && firstRowFa.web_app && firstRowFa.web_app.url === "https://twenyonerrf.ir/app/" &&
-  firstRowFa.text === mod.i18n.fa.btnMiniApp && !("callback_data" in firstRowFa));
-check("miniapp: dashboard first row is web_app button (en, no email)",
-  firstRowEn && firstRowEn.web_app && firstRowEn.web_app.url === "https://twenyonerrf.ir/app/" &&
-  firstRowEn.text === mod.i18n.en.btnMiniApp);
+// Row 0 pairs the Web App entry with Generate so the Mini App button
+// renders as a normal side-by-side button, not a stretched full-width row.
+const row0Fa = dashFa.keyboard.inline_keyboard[0];
+const row0En = dashEn.keyboard.inline_keyboard[0];
+const miniFa = row0Fa && row0Fa[0];
+const miniEn = row0En && row0En[0];
+check("miniapp: dashboard first row pairs web_app button with generate (fa, with email)",
+  Array.isArray(row0Fa) && row0Fa.length === 2 &&
+  miniFa && miniFa.web_app && miniFa.web_app.url === "https://twenyonerrf.ir/app/" &&
+  miniFa.text === mod.i18n.fa.btnMiniApp && !("callback_data" in miniFa) &&
+  row0Fa[1] && row0Fa[1].callback_data === "generate");
+check("miniapp: dashboard first row pairs web_app button with generate (en, no email)",
+  Array.isArray(row0En) && row0En.length === 2 &&
+  miniEn && miniEn.web_app && miniEn.web_app.url === "https://twenyonerrf.ir/app/" &&
+  miniEn.text === mod.i18n.en.btnMiniApp &&
+  row0En[1] && row0En[1].callback_data === "generate");
+check("miniapp: Mini App URL unchanged by pairing",
+  JSON.stringify(dashFa.keyboard).includes('"url":"https://twenyonerrf.ir/app/"'));
 check("miniapp: old buttons still present after insert",
   JSON.stringify(dashFa.keyboard).includes('"callback_data":"generate"') &&
   JSON.stringify(dashFa.keyboard).includes('"callback_data":"inbox"') &&

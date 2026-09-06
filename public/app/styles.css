@@ -211,9 +211,12 @@ a.btn { text-decoration: none; text-align: center; line-height: 22px; }
   font-weight: 700;
 }
 .link-btn { background: none; border: none; color: var(--muted); cursor: pointer; font-size: 0.85rem; min-height: 40px; }
-.inbox-list { display: flex; flex-direction: column; }
+.inbox-list { display: flex; flex-direction: column; min-width: 0; }
 .inbox-item {
   width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  overflow: hidden;
   text-align: start;
   background: transparent;
   border: none;
@@ -225,16 +228,39 @@ a.btn { text-decoration: none; text-align: center; line-height: 22px; }
 }
 .inbox-item:first-child { border-top: 1px solid var(--border); }
 .inbox-item:active { opacity: 0.6; }
-.inbox-item .subj { font-weight: 700; font-size: 0.95rem; margin-bottom: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.inbox-item .prev { color: var(--muted); font-size: 0.84rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.inbox-item .row { display: flex; justify-content: space-between; gap: 8px; font-size: 0.74rem; color: var(--muted); margin-top: 7px; }
+.inbox-item .subj { font-weight: 700; font-size: 0.95rem; margin-bottom: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; overflow-wrap: anywhere; }
+.inbox-item .prev { color: var(--muted); font-size: 0.84rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; overflow-wrap: anywhere; }
+.inbox-item .row { display: flex; justify-content: space-between; align-items: center; gap: 8px; font-size: 0.74rem; color: var(--muted); margin-top: 7px; min-width: 0; }
+.inbox-item .row > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.inbox-item .row > span:last-child { flex: none; }
 .badge {
   display: inline-block;
+  flex: none;
   font-size: 0.7rem;
   border-radius: 999px;
   padding: 1px 8px;
   background: var(--secondary-bg);
   margin-inline-start: 6px;
+  max-width: 100%;
+}
+/* Compact in-item verification action (e.g. Aparat "✅ تایید حساب").
+   Short label only — the long URL lives in href, never as visible text,
+   so it can never stretch the layout. */
+.inbox-action {
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  margin-top: 8px;
+  padding: 8px 14px;
+  border-radius: 10px;
+  background: var(--primary);
+  color: var(--primary-text);
+  font-size: 0.82rem;
+  font-weight: 700;
+  text-decoration: none;
+  text-align: center;
 }
 .empty { text-align: center; padding: 44px 20px; border: 1px dashed var(--border); border-radius: var(--radius); }
 .empty-icon { font-size: 2.8rem; }

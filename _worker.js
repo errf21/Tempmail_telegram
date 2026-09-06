@@ -1559,10 +1559,16 @@ function getDashboardPayload(userData, lang = "fa") {
       `━━━━━━━━━━━━━━━`;
   }
 
+  // Row 0 pairs the Web App button with Generate so the Mini App entry
+  // renders as two normal side-by-side buttons instead of one stretched
+  // full-width button (Bot API allows mixing web_app + callback buttons
+  // in one row). URL and behavior unchanged.
   const keyboard = {
     inline_keyboard: [
-      [{ text: t.btnMiniApp, web_app: { url: MINI_APP_URL } }],
-      [{ text: t.btnGenerate, callback_data: "generate" }],
+      [
+        { text: t.btnMiniApp, web_app: { url: MINI_APP_URL } },
+        { text: t.btnGenerate, callback_data: "generate" },
+      ],
       [
         { text: t.btnInbox, callback_data: "inbox" },
         { text: t.btnRefresh, callback_data: "refresh" }
@@ -4492,6 +4498,11 @@ async function handleWebApi(request, env, url) {
       }
       const check = await validateTelegramInitData(body.initData, env.BOT_TOKEN);
       if (!check.ok) {
+        // Non-sensitive diagnostic only: log the validator REASON so
+        // production Mini App failures (empty vs tampered vs stale initData)
+        // are distinguishable in `wrangler tail`. NEVER log initData,
+        // tokens, user ids, or secrets — reason codes carry no identity.
+        try { console.warn("[auth/telegram] initData rejected: " + String(check.reason || "unknown")); } catch (_) {}
         return apiErr(check.reason === "expired" ? "expired" : "invalid_init_data", 401);
       }
       if (!isPublicAccess(env, check.userId)) return apiErr("forbidden", 403);

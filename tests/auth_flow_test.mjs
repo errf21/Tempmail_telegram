@@ -251,8 +251,9 @@ check("10. website boot ensures a web session (no Telegram gate)",
   appSrc.includes("/api/v1/web/session") && appSrc.includes("ensureWebSession"));
 check("10. website lands on dashboard, never a token gate",
   appSrc.includes("await ensureWebSession()") && appSrc.includes("await enterMain()"));
-check("10. Mini App still posts RAW initData (never initDataUnsafe)",
-  appSrc.includes("S.tg.initData") && !appSrc.includes("initDataUnsafe"));
+check("10. Mini App still posts RAW live-read initData (never initDataUnsafe)",
+  appSrc.includes("body: { initData: live }") && appSrc.includes("getLiveInitData()") &&
+  !appSrc.includes("initDataUnsafe"));
 check("10. recovery token path preserved as secondary",
   appSrc.includes("/api/v1/auth/token") && appSrc.includes("loginWithToken") &&
   indexSrc.includes('id="input-token"') && indexSrc.includes('id="btn-login"'));
