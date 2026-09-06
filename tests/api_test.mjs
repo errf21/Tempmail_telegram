@@ -172,6 +172,21 @@ const expired = signInitData(tgFields(777001, Math.floor(Date.now() / 1000) - 99
 const rExpired = await callApi("POST", "/api/v1/auth/telegram", { body: { initData: expired } });
 check("2c. expired initData rejected", rExpired.status === 401);
 
+// Modern clients include a `signature` key (third-party validation data).
+// Per the official first-party algorithm the HMAC covers ALL fields except
+// "hash", so signature-bearing initData must validate, not 401.
+const sigFields = { ...tgFields(777002), signature: "c2lnbmF0dXJlLWZvci10ZXN0LW9ubHk" };
+const initSig = signInitData(sigFields);
+const rSig = await callApi("POST", "/api/v1/auth/telegram", { body: { initData: initSig } });
+check("2e. valid initData WITH signature accepted (200 pending)",
+  rSig.status === 200 && rSig.json && rSig.json.user && rSig.json.user.email === null);
+check("2e. signature-bearing login verifies to the right chat",
+  (await mod.verifySessionToken(env, rSig.json.sessionToken)) === "777002");
+const tamperedSig = initSig.replace("777002", "777003");
+const rTamperedSig = await callApi("POST", "/api/v1/auth/telegram", { body: { initData: tamperedSig } });
+check("2f. tampered initData WITH signature rejected (401 invalid_signature)",
+  rTamperedSig.status === 401 && rTamperedSig.json && rTamperedSig.json.error === "invalid_signature");
+
 // session token round-trip + tamper
 const cid = await mod.verifySessionToken(env, tgToken);
 check("1. session token verifies to the right chat", cid === "777001");

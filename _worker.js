@@ -4092,8 +4092,12 @@ function webSafeEqual(a, b) {
 // Per https://core.telegram.org/bots/webapps#validating-data-received-via-the-mini-app:
 //   secret_key = HMAC_SHA256(key="WebAppData", msg=BOT_TOKEN)
 //   check      = HMAC_SHA256(key=secret_key, msg=data_check_string)
-// data_check_string = "\n"-joined "key=<value>" pairs (excluding "hash"),
-// sorted alphabetically by key. The hex digest must equal "hash".
+// data_check_string = "\n"-joined "key=<value>" pairs (excluding ONLY
+// "hash"), sorted alphabetically by key. The hex digest must equal "hash".
+// NOTE: "signature" (when present in modern clients) MUST stay included:
+// per the official bot-token (first-party) algorithm the check string
+// covers ALL received fields except "hash". Excluding "signature" belongs
+// only to third-party Ed25519 validation, which this path never performs.
 // Returns { ok:true, chatId, userId } or { ok:false, reason }.
 // Never logs the raw initData.
 
@@ -4110,7 +4114,7 @@ async function validateTelegramInitData(initData, botToken) {
     if (!hash) return { ok: false, reason: "missing_hash" };
     const pairs = [];
     for (const [k, v] of params) {
-      if (k === "hash" || k === "signature") continue;
+      if (k === "hash") continue;
       pairs.push([k, v]);
     }
     if (pairs.length === 0) return { ok: false, reason: "empty_data" };
@@ -4506,7 +4510,17 @@ async function handleWebApi(request, env, url) {
         // reveals nothing an attacker doesn't already know (they crafted
         // the payload), and lets the client show a precise message without
         // any log access. HMAC computation itself is unchanged.
-        try { console.warn("[auth/telegram] initData rejected: " + String(check.reason || "unknown")); } catch (_) {}
+        // Key SHAPE only (sorted key names, no values): distinguishes e.g.
+        // signature-bearing clients from truncated payloads. NEVER log
+        // values, hashes, tokens, user data, or secrets.
+        let keyShape = "";
+        try {
+          const kp = new URLSearchParams(String(body.initData || ""));
+          const seen = new Set();
+          for (const k of kp.keys()) seen.add(String(k));
+          keyShape = " keys=" + [...seen].sort().join(",");
+        } catch (_) { keyShape = ""; }
+        try { console.warn("[auth/telegram] initData rejected: " + String(check.reason || "unknown") + keyShape); } catch (_) {}
         const r = String(check.reason || "");
         if (r === "expired") return apiErr("expired", 401);
         if (r === "bad_hash") return apiErr("invalid_signature", 401);
