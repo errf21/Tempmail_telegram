@@ -130,6 +130,87 @@ function status(msg, kind) {
 function isHttpUrl(u) {
   return typeof u === "string" && /^https?:\/\/[^\s<>"']+$/i.test(u.trim());
 }
+/* Gmail-style detail links (XSS-safe, textContent + anchors only).
+   The body stays complete plain text; structured API links are only used
+   to linkify inline URLs and to list URLs stripped from the body text.
+   Long URLs keep the real href but show a short label. */
+function stripUrlTrailingPunct(u) {
+  return String(u || "").trim().replace(/[.,;:!?)\]'"»«›‹،؛؟]+$/g, "");
+}
+function normDetailUrl(u) {
+  return stripUrlTrailingPunct(u);
+}
+function shortUrlLabel(url) {
+  const clean = stripUrlTrailingPunct(url);
+  try {
+    const p = new URL(clean);
+    const host = p.host || clean;
+    const path = (p.pathname === "/" ? "" : p.pathname) + (p.search || "") + (p.hash || "");
+    if (!path) return host;
+    const full = host + path;
+    if (full.length <= 48) return full;
+    return host + path.slice(0, 30) + "…";
+  } catch (_) {
+    return clean.length > 48 ? clean.slice(0, 47) + "…" : clean;
+  }
+}
+function detailLinkLabel(url) {
+  const clean = stripUrlTrailingPunct(url);
+  return clean.length > 60 ? shortUrlLabel(clean) : clean;
+}
+function collectDetailLinks(d) {
+  const out = [];
+  const seen = {};
+  const push = (u, label) => {
+    if (!isHttpUrl(u)) return;
+    const clean = stripUrlTrailingPunct(u);
+    if (!isHttpUrl(clean)) return;
+    if (seen[clean]) return;
+    seen[clean] = 1;
+    out.push({ url: clean, label: label || shortUrlLabel(clean) });
+  };
+  if (d && isHttpUrl(d.activationLink)) {
+    const aClean = stripUrlTrailingPunct(d.activationLink);
+    push(aClean, (d.activationLabel && String(d.activationLabel).trim()) || shortUrlLabel(aClean));
+  }
+  for (const u of ((d && d.links) || []).slice(0, 3)) {
+    push(u, shortUrlLabel(u));
+  }
+  return out;
+}
+function renderDetailBody(container, bodyText, inlineSeen) {
+  container.textContent = "";
+  const text = bodyText || "";
+  const re = /https?:\/\/[^\s<>"']+/gi;
+  let last = 0;
+  let m;
+  const frag = document.createDocumentFragment();
+  const pushText = (s) => { if (s) frag.appendChild(document.createTextNode(s)); };
+  while ((m = re.exec(text)) !== null) {
+    const raw = m[0];
+    const start = m.index;
+    pushText(text.slice(last, start));
+    const clean = stripUrlTrailingPunct(raw);
+    const trail = raw.slice(clean.length);
+    if (isHttpUrl(clean)) {
+      if (inlineSeen) inlineSeen[normDetailUrl(clean)] = 1;
+      const a = document.createElement("a");
+      a.textContent = detailLinkLabel(clean);
+      a.href = clean;
+      a.target = "_blank";
+      a.rel = "noopener noreferrer";
+      a.dir = "ltr";
+      a.className = "detail-inline-link";
+      frag.appendChild(a);
+      if (trail) pushText(trail);
+    } else {
+      pushText(raw);
+    }
+    last = start + raw.length;
+  }
+  pushText(text.slice(last));
+  container.appendChild(frag);
+}
 async function copyText(txt) {
   try {
     await navigator.clipboard.writeText(txt);
@@ -615,27 +696,33 @@ function renderDetail(d) {
   const otpBox = $("#detail-otp-box");
   if (d.otpCode) { otpBox.classList.remove("hidden"); $("#detail-otp").textContent = d.otpCode; }
   else otpBox.classList.add("hidden");
-  // Verification link: ALWAYS a real URL action (Aparat keeps its label).
+  // Gmail-style: the body keeps its complete text with inline URLs made
+  // clickable; structured links absent from the body appear as a clean
+  // list below it. No primary verification button, no custom workflow:
+  // the href is always the real backend URL.
   const linkBox = $("#detail-link-box");
-  const a = $("#detail-link");
+  const primary = $("#detail-link");
+  if (primary) {
+    primary.classList.add("hidden");
+    try { primary.removeAttribute("href"); } catch (_) {}
+  }
   const extra = $("#detail-links-extra");
   extra.textContent = "";
-  if (d.activationLink && isHttpUrl(d.activationLink)) {
-    linkBox.classList.remove("hidden");
-    a.textContent = "🔗 " + (d.activationLabel || t("openLink"));
-    a.href = d.activationLink;
-    const seen = {};
-    seen[d.activationLink] = 1;
-    for (const u of (d.links || []).slice(0, 3)) {
-      if (!isHttpUrl(u) || seen[u]) continue;
-      seen[u] = 1;
-      const x = el("a", "extra-link", u);
-      x.href = u; x.target = "_blank"; x.rel = "noopener"; x.dir = "ltr";
-      extra.appendChild(x);
-    }
-  } else linkBox.classList.add("hidden");
-  // Body as inert text — never markup.
-  $("#detail-body").textContent = d.bodyText || "";
+  const inlineSeen = {};
+  renderDetailBody($("#detail-body"), d.bodyText || "", inlineSeen);
+  const structured = collectDetailLinks(d);
+  const missing = structured.filter((e) => !inlineSeen[normDetailUrl(e.url)]);
+  if (!missing.length) {
+    linkBox.classList.add("hidden");
+    return;
+  }
+  linkBox.classList.remove("hidden");
+  for (const e of missing) {
+    const x = el("a", "extra-link", e.label);
+    x.href = e.url; x.target = "_blank"; x.rel = "noopener noreferrer"; x.dir = "ltr";
+    try { x.title = e.url; } catch (_) {}
+    extra.appendChild(x);
+  }
 }
 function backToMain() { show("view-main"); }
 
@@ -723,7 +810,7 @@ document.addEventListener("DOMContentLoaded", () => {
   $("#btn-do-restore").addEventListener("click", () => doRestore($("#input-restore").value));
   $("#btn-copy-new-token").addEventListener("click", () => copyText($("#new-token").textContent));
   $("#btn-copy-otp").addEventListener("click", () => copyText($("#detail-otp").textContent));
-  $("#btn-copy-body").addEventListener("click", () => copyText($("#detail-body").textContent));
+  $("#btn-copy-body").addEventListener("click", () => copyText((S.currentDetail && S.currentDetail.bodyText) || $("#detail-body").textContent));
   $("#btn-back").addEventListener("click", backToMain);
   $("#btn-logout").addEventListener("click", async () => {
     // Web logout: ask the server to clear the HttpOnly cookie (JS cannot

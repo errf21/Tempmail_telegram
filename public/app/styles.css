@@ -339,6 +339,9 @@ a.btn { text-decoration: none; text-align: center; line-height: 22px; }
 .otp-val { font-size: 1.6rem; font-weight: 700; letter-spacing: 3px; background: var(--bg); padding: 10px 18px; border-radius: 12px; border: 1px dashed var(--border); max-width: 100%; overflow-wrap: anywhere; }
 #detail-link { text-decoration: none; text-align: center; margin-bottom: 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
 .extra-link { display: block; word-break: break-all; overflow-wrap: anywhere; font-size: 0.8rem; color: var(--primary); margin-top: 8px; max-width: 100%; }
+/* Gmail-style inline links inside the detail body (anchors created via
+   textContent only; href keeps the real URL, visible text may be shortened). */
+.detail-body a { color: var(--primary); overflow-wrap: anywhere; word-break: break-all; }
 .detail-body {
   white-space: pre-wrap;
   word-break: break-word;
