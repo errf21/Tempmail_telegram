@@ -62,6 +62,7 @@ const i18n = {
     restoreWrongOwner: "❌ این توکن متعلق به حساب شما نیست.",
     btnHelp: "ℹ️ راهنما",
     btnMiniApp: "📱 ورود به مینی‌اپ",
+    menuBtnMiniApp: "مینی‌اپ",
     btnClose: "❌ بستن",
     helpTitle: "ℹ️ <b>راهنمای استفاده از ربات</b>",
     helpIntro: "این ربات یک آدرس ایمیل موقت برای شما می‌سازد تا بتوانید بدون استفاده از ایمیل اصلی خود، در سایت‌ها ثبت‌نام کنید یا کدهای تایید را دریافت نمایید.",
@@ -147,6 +148,7 @@ const i18n = {
     restoreWrongOwner: "❌ This token does not belong to your account.",
     btnHelp: "ℹ️ Help",
     btnMiniApp: "📱 Open Mini App",
+    menuBtnMiniApp: "Mini App",
     btnClose: "❌ Close",
     helpTitle: "ℹ️ <b>How to use this bot</b>",
     helpIntro: "This bot creates a temporary email address for you so you can sign up on websites or receive verification codes without exposing your real inbox.",
@@ -719,7 +721,8 @@ export default {
     }
 
     // One-time (idempotent) setup: pin the permanent chat Menu Button
-    // ("📱 ورود به مینی‌اپ") that opens the Mini App URL above.
+    // (menuBtnMiniApp, short text per Bot API limits) that opens the Mini
+    // App URL above. btnMiniApp stays for the dashboard inline button only.
     // Same pattern/security as /set-webhook: server-side BOT_TOKEN only.
     if (request.method === "GET" && url.pathname === "/set-menu-button") {
       if (!env.BOT_TOKEN || env.BOT_TOKEN === "YOUR_TELEGRAM_BOT_TOKEN") {
@@ -731,7 +734,7 @@ export default {
         body: JSON.stringify({
           menu_button: {
             type: "web_app",
-            text: i18n.fa.btnMiniApp,
+            text: i18n.fa.menuBtnMiniApp,
             web_app: { url: MINI_APP_URL }
           }
         })
@@ -4383,17 +4386,20 @@ async function apiEmailDetail(env, email, id, lang) {
   const list = await db.listInbox(env, email);
   const item = list.find((r) => String(r.id) === String(id));
   if (!item) return null;
-  // Body: stored preview when present; otherwise lazy-parse the saved raw
-  // MIME exactly like renderFullEmail() does (parseEmailBody has its own
-  // MAX_PARSE_BYTES guard and falls back to extractFast on huge inputs).
-  let bodyText = item.body || "";
+  // Body: prefer a fresh parse of the saved raw MIME (same preference as
+  // renderFullEmail(), so web clients see the complete text, not the
+  // 200-char stored preview). The stored preview is only the fallback when
+  // raw is unavailable, empty, or unparseable. parseEmailBody has its own
+  // MAX_PARSE_BYTES guard and falls back to extractFast on huge inputs.
+  const storedBody = item.body || "";
+  let bodyText = "";
   let otpCode = item.otpCode || "";
   let activationLink = item.activationLink || "";
   let links = Array.isArray(item.links) ? item.links.slice(0, 3) : [];
-  if ((!bodyText || !otpCode || !activationLink) && item.raw) {
+  if ((!storedBody || !otpCode || !activationLink) && item.raw) {
     try {
       const parsed = parseEmailBody(item.raw);
-      if (!bodyText && parsed && parsed.text) bodyText = parsed.text;
+      if (parsed && parsed.text) bodyText = parsed.text;
       if (parsed && Array.isArray(parsed.links) && links.length === 0) {
         links = parsed.links.filter((u) => typeof u === "string").slice(0, 3);
       }
@@ -4411,6 +4417,7 @@ async function apiEmailDetail(env, email, id, lang) {
       try { await db.updateInboxAction(env, email, item.id, otpCode, activationLink); } catch (e) { /* best-effort */ }
     }
   }
+  if (!bodyText) bodyText = storedBody;
   if (bodyText.length > WEB_DETAIL_BODY_LIMIT) {
     bodyText = bodyText.substring(0, WEB_DETAIL_BODY_LIMIT) + "\n\n(...truncated)";
   }

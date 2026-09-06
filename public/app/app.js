@@ -93,6 +93,7 @@ const S = {
   token: sessionStorage.getItem("tm_session") || "",
   tg: null,          // Telegram.WebApp or null
   isTg: false,
+  tgManual: null,    // explicit manual dark/light override inside Telegram (null = follow Telegram)
   me: null,          // {email, createdAt, lang, inboxCount}
   inbox: [],
   currentDetail: null,
@@ -167,6 +168,7 @@ function initTelegram() {
       wa.ready();
       try { wa.expand(); } catch (_) {}
       applyTgTheme(wa);
+      try { wa.onEvent("themeChanged", onTgThemeChanged); } catch (_) {}
       // Logout makes no sense inside Telegram (identity = Telegram user).
       const lo = $("#btn-logout");
       if (lo) lo.classList.add("hidden");
@@ -202,8 +204,19 @@ function applyTgTheme(wa) {
     if (p.hint_color) root.style.setProperty("--muted", "#" + p.hint_color);
     if (p.button_color) root.style.setProperty("--primary", "#" + p.button_color);
     if (p.button_text_color) root.style.setProperty("--primary-text", "#" + p.button_text_color);
-    if (wa.colorScheme === "dark") root.setAttribute("data-theme", "dark");
+    // Adopt Telegram's current colorScheme for BOTH dark and light, so a
+    // stale tm_theme/auto value can never override Telegram. Never persists
+    // to tm_theme (Telegram owns the theme until a manual override).
+    root.setAttribute("data-theme", wa.colorScheme === "light" ? "light" : "dark");
+    updateThemeToggle();
+    syncThemeMeta();
   } catch (_) {}
+}
+/* Re-apply Telegram theme changes only when there is no active manual
+   override; an explicit toggle choice (S.tgManual) always wins. */
+function onTgThemeChanged() {
+  if (S.tgManual === "dark" || S.tgManual === "light") return;
+  try { if (S.tg) applyTgTheme(S.tg); } catch (_) {}
 }
 function tgBack(showBtn) {
   try {
@@ -219,10 +232,64 @@ function tgBack(showBtn) {
 function tgHaptic() { try { S.tg && S.tg.HapticFeedback && S.tg.HapticFeedback.impactOccurred("light"); } catch (_) {} }
 
 /* ---------------- theme + lang ---------------- */
+/* Actual active theme: inside Telegram it is wa.colorScheme unless the user
+   picked an explicit manual override; in a plain browser it is S.theme,
+   with "auto" resolved from the OS (prefers-color-scheme). */
+function getEffectiveTheme() {
+  try {
+    if (S.isTg && S.tg) {
+      if (S.tgManual === "dark" || S.tgManual === "light") return S.tgManual;
+      return S.tg.colorScheme === "light" ? "light" : "dark";
+    }
+  } catch (_) {}
+  if (S.theme === "dark") return "dark";
+  if (S.theme === "light") return "light";
+  try {
+    if (window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches) return "light";
+  } catch (_) {}
+  return "dark";
+}
+function updateThemeToggle() {
+  try {
+    const b = $("#btn-theme");
+    if (b) b.textContent = getEffectiveTheme() === "dark" ? "☀️" : "🌙";
+  } catch (_) {}
+}
+function syncThemeMeta() {
+  try {
+    let bg = "";
+    try { bg = getComputedStyle(document.documentElement).getPropertyValue("--bg").trim(); } catch (_) {}
+    if (!bg) bg = getEffectiveTheme() === "light" ? "#f4f6f9" : "#0b0e13";
+    const m = document.querySelector('meta[name="theme-color"]');
+    if (m) m.setAttribute("content", bg);
+  } catch (_) {}
+}
+/* Remove Telegram inline theme vars so a pure manual dark/light choice
+   cannot mix with Telegram colors (no hybrid theme). */
+function clearTgInlineTheme() {
+  try {
+    const root = document.documentElement;
+    for (const k of ["--bg", "--card", "--text", "--muted", "--primary", "--primary-text"]) {
+      root.style.removeProperty(k);
+    }
+  } catch (_) {}
+}
 function applyTheme() {
-  document.documentElement.setAttribute("data-theme", S.theme);
-  $("#btn-theme").textContent = S.theme === "dark" ? "☀️" : "🌙";
-  localStorage.setItem("tm_theme", S.theme);
+  // Plain browser: OS-based "auto" until the user explicitly chooses;
+  // the choice persists to tm_theme. Inside Telegram the automatic
+  // Telegram theme is never persisted; only a manual toggle sets the
+  // in-memory S.tgManual override (pure vars, no hybrid).
+  if (S.isTg && (S.tgManual === "dark" || S.tgManual === "light")) {
+    clearTgInlineTheme();
+    document.documentElement.setAttribute("data-theme", S.tgManual);
+  } else if (!S.isTg) {
+    document.documentElement.setAttribute("data-theme", S.theme);
+    try { localStorage.setItem("tm_theme", S.theme); } catch (_) {}
+  }
+  // Inside Telegram without an override, data-theme stays owned by
+  // applyTgTheme (called at init + on themeChanged).
+  updateThemeToggle();
+  syncThemeMeta();
 }
 function applyLang() {
   const rtl = S.lang !== "en";
@@ -631,7 +698,12 @@ async function doLang() {
 /* ---------------- wire up ---------------- */
 document.addEventListener("DOMContentLoaded", () => {
   $("#btn-theme").addEventListener("click", () => {
-    S.theme = S.theme === "dark" ? "light" : "dark";
+    // Manual choice is an explicit override: inside Telegram it sets the
+    // in-memory override (pure theme, never persisted to tm_theme);
+    // in a plain browser it leaves "auto" for an explicit dark/light.
+    const next = getEffectiveTheme() === "dark" ? "light" : "dark";
+    if (S.isTg) S.tgManual = next;
+    else S.theme = next;
     applyTheme();
   });
   $("#btn-lang").addEventListener("click", doLang);

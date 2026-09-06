@@ -274,6 +274,62 @@ check("12. helper agrees (same locked functions as bot)",
     { from: "Aparat <no-reply@aparat.com>", subject: "x", activationLink: "https://www.aparat.com/a" }, "fa"
   ).activationLabel === "✅ تایید حساب");
 
+// ================= 10b. detail prefers fresh raw parse over stored snippet ==
+const LONG_TAIL = "TAIL-MARKER-987654321";
+const longPlainText = "Lorem ipsum dolor sit amet, consectetur adipiscing elit. " + "Pack my box with five dozen liquor jugs. ".repeat(12) + LONG_TAIL;
+const longRaw =
+  "From: Long <l@x.com>\r\nTo: buser@example.com\r\nSubject: Long story\r\n" +
+  "Content-Type: text/plain; charset=utf-8\r\n\r\n" + longPlainText;
+await mod.db.appendInbox(env, "buser@example.com", {
+  id: "bLong", ts: 5000, from: "Long <l@x.com>", subject: "Long story",
+  body: longPlainText.substring(0, 200), links: [], date: "d5", raw: longRaw,
+  otpCode: "", activationLink: "",
+});
+const rLong = await callApi("GET", "/api/v1/inbox/bLong", { token: webTokenB });
+check("10b. plain mail returns FULL parsed body, not the 200-char stored preview",
+  rLong.status === 200 && rLong.json.bodyText.length > 200 &&
+  rLong.json.bodyText.includes(LONG_TAIL));
+// Action mail with complete raw: parsed body AND link stay intact.
+const aparatBody = "Hello, please confirm your account. " + "Extra context sentence. ".repeat(20) + LONG_TAIL;
+const aparatRaw =
+  "From: Aparat <no-reply@aparat.com>\r\nTo: buser@example.com\r\nSubject: x\r\n" +
+  "Content-Type: text/plain; charset=utf-8\r\n\r\n" + aparatBody +
+  " Verify here: https://www.aparat.com/verify/y/abc123";
+await mod.db.appendInbox(env, "buser@example.com", {
+  id: "bApFull", ts: 6000, from: "Aparat <no-reply@aparat.com>", subject: "تکمیل ثبت نام",
+  body: "", links: ["https://www.aparat.com/verify/y/abc123"], date: "d6", raw: aparatRaw,
+  otpCode: "", activationLink: "https://www.aparat.com/verify/y/abc123",
+});
+const rApFull = await callApi("GET", "/api/v1/inbox/bApFull", { token: webTokenB });
+check("10b. action mail returns parsed body (not empty stored body)",
+  rApFull.status === 200 && rApFull.json.bodyText.length > 200 &&
+  rApFull.json.bodyText.includes(LONG_TAIL));
+check("10b. action mail keeps activationLink/label alongside full body",
+  rApFull.json.activationLink === "https://www.aparat.com/verify/y/abc123" &&
+  rApFull.json.activationLabel === "✅ تایید حساب");
+// Raw unavailable: stored body remains the fallback (never empty by design).
+await mod.db.appendInbox(env, "buser@example.com", {
+  id: "bNoRaw", ts: 7000, from: "Old <o@x.com>", subject: "Legacy",
+  body: "stored snippet only", links: [], date: "d7", raw: "",
+  otpCode: "", activationLink: "",
+});
+const rNoRaw = await callApi("GET", "/api/v1/inbox/bNoRaw", { token: webTokenB });
+check("10b. missing raw falls back to stored body",
+  rNoRaw.status === 200 && rNoRaw.json.bodyText === "stored snippet only");
+// 8000-char web detail cap preserved.
+const hugeLine = "The quick brown fox jumps over the lazy dog. Pack my box with five dozen liquor jugs. \n";
+const hugeText = hugeLine.repeat(110);
+await mod.db.appendInbox(env, "buser@example.com", {
+  id: "bHuge", ts: 8000, from: "Big <b@x.com>", subject: "Huge",
+  body: "", links: [], date: "d8",
+  raw: "From: Big <b@x.com>\r\nTo: buser@example.com\r\nSubject: Huge\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n" + hugeText,
+  otpCode: "", activationLink: "",
+});
+const rHuge = await callApi("GET", "/api/v1/inbox/bHuge", { token: webTokenB });
+check("10b. 8000-char cap with (...truncated) marker intact",
+  rHuge.status === 200 && rHuge.json.bodyText.length === 8000 + "\n\n(...truncated)".length &&
+  rHuge.json.bodyText.endsWith("(...truncated)"));
+
 // ================= 13. cross-user detail blocked =============================
 const rCross = await callApi("GET", "/api/v1/inbox/a1", { token: webTokenB });
 check("13. B cannot open A's mail (404)", rCross.status === 404);
