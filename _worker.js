@@ -4502,8 +4502,18 @@ async function handleWebApi(request, env, url) {
         // production Mini App failures (empty vs tampered vs stale initData)
         // are distinguishable in `wrangler tail`. NEVER log initData,
         // tokens, user ids, or secrets — reason codes carry no identity.
+        // The same reason is returned as a PUBLIC error code below: it
+        // reveals nothing an attacker doesn't already know (they crafted
+        // the payload), and lets the client show a precise message without
+        // any log access. HMAC computation itself is unchanged.
         try { console.warn("[auth/telegram] initData rejected: " + String(check.reason || "unknown")); } catch (_) {}
-        return apiErr(check.reason === "expired" ? "expired" : "invalid_init_data", 401);
+        const r = String(check.reason || "");
+        if (r === "expired") return apiErr("expired", 401);
+        if (r === "bad_hash") return apiErr("invalid_signature", 401);
+        if (r === "missing_hash" || r === "empty_data") return apiErr("missing_hash", 401);
+        if (r === "bad_user") return apiErr("bad_user", 401);
+        if (r === "bad_init_data" || r === "bad_auth_date") return apiErr("empty_init_data", 401);
+        return apiErr("invalid_init_data", 401);
       }
       if (!isPublicAccess(env, check.userId)) return apiErr("forbidden", 403);
       // Seamless login (empty state + Create): a validated Telegram user

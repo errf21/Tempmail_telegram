@@ -51,6 +51,7 @@ html[data-theme="dark"], html[data-theme="auto"] {
   }
 }
 * { box-sizing: border-box; }
+html, body { overflow-x: clip; }
 body {
   margin: 0;
   background: var(--bg);
@@ -67,6 +68,8 @@ body {
   flex-direction: column;
   padding-top: var(--safe-t);
   padding-bottom: var(--safe-b);
+  min-width: 0;
+  overflow-x: clip;
 }
 /* ---------- top bar ---------- */
 .topbar {
@@ -181,24 +184,30 @@ a.btn { text-decoration: none; text-align: center; line-height: 22px; }
 }
 .confirm-text { margin: 0 0 10px; font-size: 0.88rem; line-height: 1.8; }
 .btn-row { display: flex; gap: 8px; }
-.btn-row .btn { flex: 1; }
-.action-row { display: flex; gap: 8px; margin-top: 14px; }
+.btn-row .btn { flex: 1; min-width: 0; }
+.action-row { display: flex; gap: 8px; margin-top: 14px; flex-wrap: wrap; }
 .chip {
-  flex: 1;
+  flex: 1 1 0;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   border: 1px solid var(--border);
   background: transparent;
   color: var(--text);
   border-radius: 12px;
   min-height: var(--tap);
-  font-size: 0.88rem;
+  padding-left: 6px;
+  padding-right: 6px;
+  font-size: 0.82rem;
   font-weight: 600;
   cursor: pointer;
   transition: opacity 150ms ease, transform 120ms ease;
 }
 .chip:active { transform: scale(0.97); }
-.restore-box { margin-top: 14px; border-top: 1px solid var(--border); padding-top: 14px; animation: fadein 150ms ease; }
-.token-box { margin-top: 14px; background: var(--bg); border: 1px solid var(--border); border-radius: 12px; padding: 14px; }
-.token-val { display: block; font-size: 1.15rem; margin: 8px 0 12px; letter-spacing: 1px; }
+.restore-box { margin-top: 14px; border-top: 1px solid var(--border); padding-top: 14px; animation: fadein 150ms ease; min-width: 0; }
+.token-box { margin-top: 14px; background: var(--bg); border: 1px solid var(--border); border-radius: 12px; padding: 14px; min-width: 0; overflow: hidden; }
+.token-val { display: block; font-size: 1.15rem; margin: 8px 0 12px; letter-spacing: 1px; max-width: 100%; overflow-wrap: anywhere; }
 /* ---------- inbox ---------- */
 .inbox-head { display: flex; align-items: center; justify-content: space-between; margin: 6px 2px 10px; }
 .inbox-head h2 { font-size: 1.02rem; margin: 0; font-weight: 800; }
@@ -212,7 +221,18 @@ a.btn { text-decoration: none; text-align: center; line-height: 22px; }
 }
 .link-btn { background: none; border: none; color: var(--muted); cursor: pointer; font-size: 0.85rem; min-height: 40px; }
 .inbox-list { display: flex; flex-direction: column; min-width: 0; }
+/* Row wrapper: message button + optional action sibling (never nested). */
+.inbox-wrap {
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 12px;
+  margin-bottom: 2px;
+}
+.inbox-wrap:first-child { border-top: 1px solid var(--border); }
 .inbox-item {
+  display: block;
   width: 100%;
   max-width: 100%;
   min-width: 0;
@@ -220,19 +240,57 @@ a.btn { text-decoration: none; text-align: center; line-height: 22px; }
   text-align: start;
   background: transparent;
   border: none;
-  border-bottom: 1px solid var(--border);
-  padding: 14px 4px;
+  padding: 12px 4px 2px;
   color: var(--text);
   cursor: pointer;
   transition: opacity 150ms ease;
+  font-family: inherit;
 }
-.inbox-item:first-child { border-top: 1px solid var(--border); }
 .inbox-item:active { opacity: 0.6; }
-.inbox-item .subj { font-weight: 700; font-size: 0.95rem; margin-bottom: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; overflow-wrap: anywhere; }
-.inbox-item .prev { color: var(--muted); font-size: 0.84rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; overflow-wrap: anywhere; }
-.inbox-item .row { display: flex; justify-content: space-between; align-items: center; gap: 8px; font-size: 0.74rem; color: var(--muted); margin-top: 7px; min-width: 0; }
-.inbox-item .row > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.inbox-item .row > span:last-child { flex: none; }
+/* Gmail-like hierarchy: sender + time top line, distinct subject,
+   secondary truncated preview. Every line clamps: long content can
+   never control the width. */
+.inbox-item .toprow {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 10px;
+  min-width: 0;
+  font-size: 0.78rem;
+}
+.inbox-item .sender {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 700;
+}
+.inbox-item .time {
+  flex: none;
+  color: var(--muted);
+  font-size: 0.72rem;
+  white-space: nowrap;
+}
+.inbox-item .subj {
+  font-weight: 600;
+  font-size: 0.9rem;
+  margin: 2px 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+.inbox-item .prev {
+  color: var(--muted);
+  font-size: 0.8rem;
+  line-height: 1.5;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+.inbox-item .meta { display: flex; gap: 4px; margin-top: 5px; min-width: 0; }
 .badge {
   display: inline-block;
   flex: none;
@@ -240,7 +298,6 @@ a.btn { text-decoration: none; text-align: center; line-height: 22px; }
   border-radius: 999px;
   padding: 1px 8px;
   background: var(--secondary-bg);
-  margin-inline-start: 6px;
   max-width: 100%;
 }
 /* Compact in-item verification action (e.g. Aparat "✅ تایید حساب").
@@ -252,7 +309,7 @@ a.btn { text-decoration: none; text-align: center; line-height: 22px; }
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  margin-top: 8px;
+  margin: 8px 4px 0;
   padding: 8px 14px;
   border-radius: 10px;
   background: var(--primary);
@@ -272,14 +329,16 @@ a.btn { text-decoration: none; text-align: center; line-height: 22px; }
 .status.error { background: rgba(214, 69, 69, 0.1); color: var(--danger); border: 1px solid var(--danger); }
 .status.ok { background: rgba(46, 160, 90, 0.1); color: var(--ok); border: 1px solid var(--ok); }
 /* ---------- detail ---------- */
-.detail-service { font-size: 0.82rem; color: var(--muted); }
-.detail-subject { margin: 6px 0 12px; font-size: 1.2rem; font-weight: 800; word-break: break-word; letter-spacing: -0.2px; }
-.meta-grid { display: flex; flex-direction: column; gap: 8px; font-size: 0.85rem; margin-bottom: 14px; }
-.otp-box, .link-box { margin: 14px 0; }
-.otp-row { display: flex; align-items: center; gap: 10px; }
-.otp-val { font-size: 1.6rem; font-weight: 700; letter-spacing: 3px; background: var(--bg); padding: 10px 18px; border-radius: 12px; border: 1px dashed var(--border); }
-#detail-link { text-decoration: none; text-align: center; margin-bottom: 8px; }
-.extra-link { display: block; word-break: break-all; font-size: 0.8rem; color: var(--primary); margin-top: 8px; }
+.detail-service { font-size: 0.82rem; color: var(--muted); overflow: hidden; text-overflow: ellipsis; max-width: 100%; overflow-wrap: anywhere; }
+.detail-subject { margin: 6px 0 12px; font-size: 1.2rem; font-weight: 800; word-break: break-word; overflow-wrap: anywhere; letter-spacing: -0.2px; max-width: 100%; }
+.meta-grid { display: flex; flex-direction: column; gap: 8px; font-size: 0.85rem; margin-bottom: 14px; min-width: 0; }
+.meta-grid > div { min-width: 0; overflow: hidden; text-overflow: ellipsis; overflow-wrap: anywhere; }
+.meta-grid .mono { overflow-wrap: anywhere; }
+.otp-box, .link-box { margin: 14px 0; min-width: 0; }
+.otp-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; min-width: 0; }
+.otp-val { font-size: 1.6rem; font-weight: 700; letter-spacing: 3px; background: var(--bg); padding: 10px 18px; border-radius: 12px; border: 1px dashed var(--border); max-width: 100%; overflow-wrap: anywhere; }
+#detail-link { text-decoration: none; text-align: center; margin-bottom: 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
+.extra-link { display: block; word-break: break-all; overflow-wrap: anywhere; font-size: 0.8rem; color: var(--primary); margin-top: 8px; max-width: 100%; }
 .detail-body {
   white-space: pre-wrap;
   word-break: break-word;

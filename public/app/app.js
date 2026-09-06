@@ -4,6 +4,11 @@
    Only http(s) URLs are ever turned into clickable anchors. */
 "use strict";
 
+/* Release marker: bump on every user-facing release. Used for asset
+   cache-busting (?v=BUILD in index.html) and as a non-sensitive
+   deployed-version proof (footer title + console). */
+const BUILD = "20260906-gmail1";
+
 /* Deploy-time config: set to the bot deep link, e.g. "https://t.me/YourBot".
    Shown on the no_session screen inside Telegram so users can jump to the
    bot, create an email, and come back. Empty = button hidden, text only. */
@@ -33,6 +38,9 @@ const STR = {
     errExpiredTg: "نشست تلگرام منقضی شده است. مینی‌اپ را ببندید و دوباره باز کنید.",
     errForbiddenTg: "دسترسی به این ربات ندارید.",
     errInvalidTg: "احراز هویت تلگرام ناموفق بود. مینی‌اپ را ببندید و دوباره باز کنید.",
+    errSigTg: "امضای تلگرام معتبر نیست. مینی‌اپ را از دکمه همین ربات باز کنید، نه از جای دیگر.",
+    errMissingTg: "اطلاعات تلگرام ناقص رسید. مینی‌اپ را ببندید و دوباره باز کنید.",
+    errBadUserTg: "شناسه تلگرام نامعتبر است. از حساب دیگری وارد شوید.",
     errToken: "توکن نامعتبر است. فرمت: tmp_xxxxxx", errUnknown: "خطایی رخ داد.",
     errNoSession: "نشست فعالی برای این حساب نیست. ابتدا در ربات تلگرام یک ایمیل بسازید.",
     noEmail: "هنوز ایمیلی ندارید", noEmailText: "هنوز ایمیلی ندارید. با یک ضربه یکی بسازید.",
@@ -64,6 +72,9 @@ const STR = {
     errExpiredTg: "Telegram session expired. Close and reopen the Mini App.",
     errForbiddenTg: "You do not have access to this bot.",
     errInvalidTg: "Telegram authentication failed. Close and reopen the Mini App.",
+    errSigTg: "Telegram signature invalid. Open the Mini App from this bot's button, not from elsewhere.",
+    errMissingTg: "Incomplete Telegram data received. Close and reopen the Mini App.",
+    errBadUserTg: "Invalid Telegram identity. Try a different account.",
     errToken: "Invalid token. Format: tmp_xxxxxx", errUnknown: "Something went wrong.",
     errNoSession: "No active session for this account. Create an email in the Telegram bot first.",
     noEmail: "No email yet", noEmailText: "No email yet. Create one with a single tap.",
@@ -308,6 +319,9 @@ function miniAuthError(e) {
   }
   if (e.code === "expired" || e.code === "empty_init_data") status(t("errExpiredTg"), "error");
   else if (e.code === "forbidden") status(t("errForbiddenTg"), "error");
+  else if (e.code === "invalid_signature") status(t("errSigTg"), "error");
+  else if (e.code === "missing_hash") status(t("errMissingTg"), "error");
+  else if (e.code === "bad_user") status(t("errBadUserTg"), "error");
   else if (e.code === "invalid_init_data") status(t("errInvalidTg"), "error");
   else status(t("errNetwork"), "error");
   showEntry();
@@ -469,33 +483,46 @@ async function loadInbox(silent) {
   $("#inbox-empty").classList.toggle("hidden", items.length !== 0);
   for (const it of items) list.appendChild(renderItem(it));
 }
+/* Gmail-like hierarchy: sender + time on the top line, distinct subject,
+   secondary truncated preview, compact badges, optional action row.
+   The row root is a plain wrapper div; the message button and the action
+   anchor are SIBLINGS (an <a> inside a <button> is invalid HTML and
+   misbehaves on Safari/keyboard/middle-click). All email content via
+   textContent only — no innerHTML, no arbitrary email HTML. */
 function renderItem(it) {
+  const wrap = el("div", "inbox-wrap");
   const b = el("button", "inbox-item");
   b.type = "button";
+  // Top line: sender/service + timestamp.
+  const top = el("div", "toprow");
+  top.appendChild(el("span", "sender", it.sender || ""));
+  top.appendChild(el("span", "time", it.date || ""));
+  b.appendChild(top);
+  // Distinct subject.
   b.appendChild(el("div", "subj", it.subject || "(No Subject)"));
-  b.appendChild(el("div", "prev", it.preview || it.otpCode ? ("🔑 " + (it.otpCode || "") + " " + (it.preview || "")) : ""));
-  const row = el("div", "row");
-  row.appendChild(el("span", "", it.sender || ""));
-  const right = el("span", "");
-  right.appendChild(el("span", "", it.date || ""));
-  if (it.hasOtp) right.appendChild(el("span", "badge", "🔑"));
-  if (it.hasLink) right.appendChild(el("span", "badge", "🔗"));
-  row.appendChild(right);
-  b.appendChild(row);
+  // Secondary preview, truncated; omitted entirely when empty (no gap).
+  const prevText = it.preview || it.otpCode ? ("🔑 " + (it.otpCode || "") + " " + (it.preview || "")).trim() : "";
+  if (prevText) b.appendChild(el("div", "prev", prevText));
+  // Compact badges row (only when there is something to show).
+  if (it.hasOtp || it.hasLink) {
+    const meta = el("div", "meta");
+    if (it.hasOtp) meta.appendChild(el("span", "badge", "🔑"));
+    if (it.hasLink) meta.appendChild(el("span", "badge", "🔗"));
+    b.appendChild(meta);
+  }
+  b.addEventListener("click", () => openDetail(it.id));
+  wrap.appendChild(b);
   // Compact verification action (e.g. Aparat "✅ تایید حساب"): short label
   // only, gated by the existing HTTPS check. The long URL lives in href
-  // (never as visible text) so it cannot stretch the layout. textContent
-  // only — no innerHTML, no arbitrary email HTML.
+  // (never as visible text) so it cannot stretch the layout.
   if (it.activationLink && isHttpUrl(it.activationLink)) {
     const a = el("a", "inbox-action", it.activationLabel || ("🔗 " + t("openLink")));
     a.href = it.activationLink;
     a.target = "_blank";
     a.rel = "noopener";
-    a.addEventListener("click", (ev) => ev.stopPropagation());
-    b.appendChild(a);
+    wrap.appendChild(a);
   }
-  b.addEventListener("click", () => openDetail(it.id));
-  return b;
+  return wrap;
 }
 
 /* ---------------- detail ---------------- */
@@ -642,4 +669,11 @@ document.addEventListener("DOMContentLoaded", () => {
     }
   });
   boot();
+  // Non-sensitive deployed-version proof: footer tooltip + console line
+  // let anyone verify which release Telegram/a browser executes.
+  try {
+    console.log("[tempmail] build " + BUILD);
+    const foot = document.querySelector(".footer span");
+    if (foot) foot.title = "build " + BUILD;
+  } catch (_) {}
 });

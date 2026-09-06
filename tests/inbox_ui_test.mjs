@@ -17,12 +17,14 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+import { createHmac } from "node:crypto";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = join(__dirname, "..");
 const workerSrc = readFileSync(join(root, "_worker.js"), "utf8");
 const appSrc = readFileSync(join(root, "public/app/app.js"), "utf8");
 const cssSrc = readFileSync(join(root, "public/app/styles.css"), "utf8");
+const indexSrc = readFileSync(join(root, "public/app/index.html"), "utf8");
 const m1 = readFileSync(join(root, "migrations/0001_initial.sql"), "utf8");
 const m2 = readFileSync(join(root, "migrations/0002_inbox_raw.sql"), "utf8");
 const m3 = readFileSync(join(root, "migrations/0003_inbox_action.sql"), "utf8");
@@ -81,12 +83,22 @@ check("css. subject/preview clamp long unbroken URLs",
   /\.inbox-item\s+\.subj\s*\{[^}]*max-width:\s*100%/.test(cssSrc) &&
   /\.inbox-item\s+\.prev\s*\{[^}]*max-width:\s*100%/.test(cssSrc) &&
   cssSrc.includes("overflow-wrap: anywhere"));
-check("css. flex row children can shrink (sender/date/badges)",
-  /\.inbox-item\s+\.row\s*>\s*span\s*\{[^}]*min-width:\s*0/.test(cssSrc) &&
+check("css. flex row children can shrink (sender/time/badges)",
+  /\.inbox-item\s+\.sender\s*\{[^}]*min-width:\s*0/.test(cssSrc) &&
+  /\.inbox-item\s+\.time\s*\{[^}]*flex:\s*none/.test(cssSrc) &&
   /\.badge\s*\{[^}]*flex:\s*none/.test(cssSrc));
 check("css. inbox action button itself is clamped",
   /\.inbox-action\s*\{[^}]*max-width:\s*100%/.test(cssSrc) &&
   /\.inbox-action\s*\{[^}]*text-overflow:\s*ellipsis/.test(cssSrc));
+check("css. page-level horizontal backstop (never viewport scroll)",
+  /html,\s*body\s*\{[^}]*overflow-x:\s*clip/.test(cssSrc));
+check("css. detail sender/meta/otp clamp long content",
+  /\.detail-service\s*\{[^}]*overflow:\s*hidden/.test(cssSrc) &&
+  /\.otp-row\s*\{[^}]*flex-wrap:\s*wrap/.test(cssSrc) &&
+  /\.otp-val\s*\{[^}]*max-width:\s*100%/.test(cssSrc));
+check("css. action-row chips wrap on narrow screens",
+  /\.action-row\s*\{[^}]*flex-wrap:\s*wrap/.test(cssSrc) &&
+  /\.chip\s*\{[^}]*min-width:\s*0/.test(cssSrc));
 
 // ================= 2. Aparat link end-to-end ================================
 const wSession = await callApi("POST", "/api/v1/web/session", { body: {} });
@@ -109,13 +121,26 @@ check("api. raw MIME never leaks into list items", !!apItem && !("raw" in apItem
 check("api. subject containing a long URL is still served (layout is CSS-gated)",
   !!apItem && typeof apItem.subject === "string");
 
-// Frontend renderItem: action button uses the validated URL, short label,
-// textContent only, item click suppressed on the action itself.
+// Frontend renderItem: Gmail hierarchy (sender+time top, distinct subject,
+// secondary preview, badges), action anchor as a SIBLING of the button
+// (never nested interactive content), gated by isHttpUrl, short label,
+// textContent only.
+check("frontend. renderItem builds wrapper + button + sibling action (valid nesting)",
+  appSrc.includes('el("div", "inbox-wrap")') &&
+  appSrc.includes("wrap.appendChild(b)") &&
+  appSrc.includes("wrap.appendChild(a)") &&
+  !appSrc.includes("b.appendChild(a)"));
+check("frontend. Gmail hierarchy order (toprow sender/time, subject, preview)",
+  appSrc.includes('el("div", "toprow")') &&
+  appSrc.includes('el("span", "sender"') &&
+  appSrc.includes('el("span", "time"') &&
+  appSrc.indexOf('"toprow"') < appSrc.indexOf('"subj"'));
+check("frontend. empty preview node omitted (no phantom gap)",
+  appSrc.includes("if (prevText)"));
 check("frontend. renderItem builds a gated inbox-action anchor",
   appSrc.includes('el("a", "inbox-action"') &&
   appSrc.includes("it.activationLink && isHttpUrl(it.activationLink)") &&
-  appSrc.includes("it.activationLabel") &&
-  appSrc.includes("stopPropagation"));
+  appSrc.includes("it.activationLabel"));
 check("frontend. action href/target/rel set safely",
   appSrc.includes("a.href = it.activationLink") &&
   appSrc.includes('a.target = "_blank"') &&
@@ -150,6 +175,57 @@ check("backend. rejection log cannot contain secrets (reason enum only)",
   !/initData rejected:[^;]*initData[^;]*\+|initData rejected:[^;]*token|initData rejected:[^;]*userId|initData rejected:[^;]*BOT_TOKEN/.test(workerSrc));
 check("backend. HMAC validation itself untouched",
   workerSrc.includes('"WebAppData"') && workerSrc.includes("validateTelegramInitData"));
+
+// Distinct public initData error codes end-to-end (reason enum only;
+// identical HMAC computation). Uses the test BOT_TOKEN signer.
+const BOT_TOKEN = "123456:TEST-Only-Token-For-Inbox-Ui-ABCDEF";
+function signInitData(fields) {
+  const pairs = Object.entries(fields)
+    .filter(([k]) => k !== "hash")
+    .sort((a, b) => (a[0] < b[0] ? -1 : 1));
+  const dcs = pairs.map(([k, v]) => k + "=" + v).join("\n");
+  const secret = createHmac("sha256", "WebAppData").update(BOT_TOKEN).digest();
+  const hash = createHmac("sha256", secret).update(dcs).digest("hex");
+  return new URLSearchParams({ ...fields, hash }).toString();
+}
+function tgFields(userId, authDate) {
+  return {
+    auth_date: String(authDate != null ? authDate : Math.floor(Date.now() / 1000)),
+    query_id: "AAHdF6IQAAAAAN0XohDhrOrc",
+    user: JSON.stringify({ id: userId, first_name: "T", username: "tuser", language_code: "fa" }),
+  };
+}
+const initOk = signInitData(tgFields(555001));
+const rTampered = await callApi("POST", "/api/v1/auth/telegram",
+  { body: { initData: initOk.replace("555001", "555002") } });
+check("api. tampered initData -> 401 invalid_signature (distinct, no secret leak)",
+  rTampered.status === 401 && rTampered.json && rTampered.json.error === "invalid_signature" &&
+  !JSON.stringify(rTampered.json).includes(BOT_TOKEN));
+check("api. missing hash -> 401 missing_hash",
+  (await callApi("POST", "/api/v1/auth/telegram",
+    { body: { initData: "auth_date=123&user=%7B%7D" } })).json.error === "missing_hash");
+check("api. bad user id -> 401 bad_user",
+  (await callApi("POST", "/api/v1/auth/telegram",
+    { body: { initData: signInitData({ ...tgFields(1), user: JSON.stringify({ id: "abc" }) }) } })).json.error === "bad_user");
+check("api. empty initData -> 401 empty_init_data (never a crash)",
+  (await callApi("POST", "/api/v1/auth/telegram", { body: { initData: "" } })).json.error === "empty_init_data");
+check("api. expired initData still maps to expired",
+  (await callApi("POST", "/api/v1/auth/telegram",
+    { body: { initData: signInitData(tgFields(555001, Math.floor(Date.now() / 1000) - 99999)) } })).json.error === "expired");
+check("frontend. distinct messages for signature/missing/bad-user codes",
+  appSrc.includes('e.code === "invalid_signature"') && appSrc.includes("errSigTg") &&
+  appSrc.includes('e.code === "missing_hash"') && appSrc.includes("errMissingTg") &&
+  appSrc.includes('e.code === "bad_user"') && appSrc.includes("errBadUserTg"));
+
+// ================= 5. deployed-version proof =================================
+check("version. BUILD marker constant present",
+  /const BUILD = "20260906-gmail1";/.test(appSrc));
+check("version. asset hrefs cache-busted with the BUILD id",
+  indexSrc.includes('href="./styles.css?v=20260906-gmail1"') &&
+  indexSrc.includes('src="./app.js?v=20260906-gmail1"'));
+check("version. footer tooltip + console proof wired",
+  appSrc.includes('console.log("[tempmail] build " + BUILD)') &&
+  appSrc.includes('foot.title = "build " + BUILD'));
 
 // ================= 4. dashboard keyboard ====================================
 const dashFa = mod.getDashboardPayload({ email: "u@example.com", createdAt: "c", recoveryToken: "tmp_aaaa11" }, "fa");
