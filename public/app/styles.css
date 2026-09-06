@@ -450,6 +450,7 @@ html[dir="rtl"] .email-label { letter-spacing: 0; }
 .meta-grid > div { display: flex; gap: 8px; align-items: baseline; min-width: 0; overflow: hidden; }
 .meta-grid .mono { overflow-wrap: anywhere; flex: 1; min-width: 0; }
 .otp-box, .link-box { margin: 14px 0; min-width: 0; }
+.verify-link-label { font-size: 0.75rem; line-height: 1.8; color: var(--muted); margin: 0 0 8px; min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
 .otp-box {
   border: 1px dashed color-mix(in srgb, var(--accent) 50%, transparent);
   background: color-mix(in srgb, var(--accent) 7%, transparent);
