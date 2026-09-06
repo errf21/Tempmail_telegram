@@ -3607,6 +3607,507 @@ function parseEmailBody(rawEmail) {
   }
 }
 
+/* ==========================================================================
+   RICH EMAIL RENDERER (additive / parallel — frozen pipeline untouched)
+   --------------------------------------------------------------------------
+   This block is a parallel addition to parseEmailBody()/extractFast(). It
+   NEVER modifies their behavior: it only reads the saved raw MIME and
+   produces a NEW `rich` payload ({hasHtml, html, text, inlineImages,
+   remoteImagesBlocked}) for Gmail-like rendering.
+
+   Why a separate walker? parseEmailBody() decodes every nested non-text
+   part via TextDecoder (see the Seed4.Me PNG/IHDR/IEND leak: a nested
+   image/png inside multipart/related is decoded as mojibake text because
+   the inner recursion has no isAttachmentPart check). This walker instead:
+
+     - walks the FULL mime tree recursively (depth-capped),
+     - keeps image/* parts OUT of any text body (never TextDecoder'd),
+     - maps Content-ID -> image for same-email cid: resolution only,
+     - sanitizes text/html with an allowlist sanitizer (no raw HTML out).
+
+   Frozen functions called (read-only reuse, NOT modified):
+   extractBoundary, splitMimeParts, stripLeadingBoundaryLine,
+   decodeBase64Content, decodeQuotedPrintable, looksLikeBase64, cleanText.
+   ========================================================================== */
+
+const RICH_HTML_MAX_CHARS = 100 * 1024;      // sanitized html cap
+const RICH_IMG_MAX_COUNT = 10;               // max inline images per email
+const RICH_IMG_EACH_MAX_BYTES = 500 * 1024;  // max decoded bytes per image
+const RICH_IMG_TOTAL_MAX_BYTES = 2 * 1024 * 1024; // max decoded bytes total
+const RICH_WALK_MAX_DEPTH = 8;               // nesting cap (bomb safety)
+
+// image/* subtypes we are willing to render inline via cid: -> data:
+const RICH_IMAGE_MIME_RE = /^image\/(png|jpe?g|gif|webp|avif|bmp)$/i;
+
+function richNormalizeContentId(rawCid) {
+  if (rawCid == null) return "";
+  let s = String(rawCid).trim();
+  // strip RFC 2392 angle brackets: <logo123> -> logo123
+  if (s.startsWith("<") && s.endsWith(">") && s.length >= 2) {
+    s = s.substring(1, s.length - 1).trim();
+  }
+  // strip a stray leading "cid:" if a sender included it in the header
+  s = s.replace(/^cid:/i, "").trim();
+  return s;
+}
+
+function richContentIdKey(rawCid) {
+  return richNormalizeContentId(rawCid).toLowerCase();
+}
+
+function richExtractContentId(partHeaders) {
+  if (!partHeaders) return "";
+  const m = String(partHeaders).match(/content-id\s*:\s*([^\r\n]+)/i);
+  if (!m) return "";
+  return richNormalizeContentId(m[1]);
+}
+
+function richEstimateBase64Bytes(b64clean) {
+  if (!b64clean) return 0;
+  const len = b64clean.length;
+  let pad = 0;
+  if (b64clean.endsWith("==")) pad = 2;
+  else if (b64clean.endsWith("=")) pad = 1;
+  return Math.max(0, Math.floor((len * 3) / 4) - pad);
+}
+
+function richCleanBase64(content) {
+  if (!content) return "";
+  const b64 = String(content).replace(/\s/g, "");
+  if (b64.length < 4) return "";
+  if (/[^A-Za-z0-9+/=]/.test(b64)) return "";
+  return b64;
+}
+
+// Recursive MIME walker for the rich renderer. Collects into `out`:
+//   out.textParts[]  - decoded text/plain bodies only
+//   out.htmlParts[]  - decoded text/html bodies only (raw, sanitized later)
+//   out.images       - Map<key, {contentId, mimeType, b64, size}>
+// Binary/image bytes are NEVER pushed into textParts/htmlParts.
+function richWalkPart(partStr, parentHeaders, boundary, depth, out) {
+  if (!partStr || !out) return;
+  if (depth > RICH_WALK_MAX_DEPTH) return;
+
+  let partHeaders = "";
+  let content = partStr;
+  const crlfSplit = partStr.indexOf("\r\n\r\n");
+  const lfSplit = partStr.indexOf("\n\n");
+  if (crlfSplit !== -1 && (lfSplit === -1 || crlfSplit < lfSplit)) {
+    partHeaders = partStr.substring(0, crlfSplit);
+    content = partStr.substring(crlfSplit + 4);
+  } else if (lfSplit !== -1) {
+    partHeaders = partStr.substring(0, lfSplit);
+    content = partStr.substring(lfSplit + 2);
+  }
+  const partHeadersBlob = partHeaders || "";
+
+  if (boundary) {
+    const delim = "--" + boundary;
+    const closeDelim = "--" + boundary + "--";
+    let cut = content.length;
+    const closeIdx = content.indexOf(closeDelim);
+    if (closeIdx !== -1) cut = Math.min(cut, closeIdx);
+    const nextIdx = content.indexOf("\n" + delim);
+    if (nextIdx !== -1) cut = Math.min(cut, nextIdx);
+    const nextIdxCrlf = content.indexOf("\r\n" + delim);
+    if (nextIdxCrlf !== -1) cut = Math.min(cut, nextIdxCrlf);
+    if (cut < content.length) content = content.substring(0, cut);
+  }
+
+  const ctMatch = partHeadersBlob.match(/content-type\s*:\s*([^\r\n;]+)/i)
+    || (parentHeaders ? String(parentHeaders).match(/content-type\s*:\s*([^\r\n;]+)/i) : null);
+  const mime = ctMatch ? ctMatch[1].trim().toLowerCase() : "text/plain";
+
+  // Nested multipart: recurse into EVERY inner part. Unlike the legacy
+  // pipeline, leaf filtering happens at the leaf level below, so nested
+  // image/* parts can never leak into text.
+  if (mime.startsWith("multipart/")) {
+    const innerBoundary = extractBoundary(partHeadersBlob) || extractBoundary(parentHeaders || "");
+    if (innerBoundary) {
+      const innerParts = splitMimeParts(content, innerBoundary);
+      for (const ip of innerParts) {
+        if (out.images.size >= RICH_IMG_MAX_COUNT && out.htmlParts.join("").length > RICH_HTML_MAX_CHARS) break;
+        richWalkPart(ip, partHeadersBlob, innerBoundary, depth + 1, out);
+      }
+      return;
+    }
+    // multipart without a usable boundary: nothing safe to decode — skip.
+    return;
+  }
+
+  content = stripLeadingBoundaryLine(content);
+
+  // ---- image/* leaf: collect for cid: map, NEVER decode as text ----
+  if (mime.startsWith("image/")) {
+    if (!RICH_IMAGE_MIME_RE.test(mime)) return;
+    if (out.images.size >= RICH_IMG_MAX_COUNT) return;
+    const cid = richExtractContentId(partHeadersBlob);
+    if (!cid) return; // only cid-addressable inline images are useful
+    const key = cid.toLowerCase();
+    if (out.images.has(key)) return; // first wins
+    const transferEncMatch = partHeadersBlob.match(/content-transfer-encoding\s*:\s*([^\r\n]+)/i);
+    const transferEnc = transferEncMatch ? transferEncMatch[1].trim().toLowerCase() : "";
+    let b64 = "";
+    if (transferEnc === "base64" || transferEnc === "" || transferEnc === "7bit" || transferEnc === "8bit" || transferEnc === "binary") {
+      b64 = richCleanBase64(content);
+      if (!b64 && transferEnc === "base64") return;
+      if (!b64) return;
+    } else {
+      return; // unsupported encoding for images (e.g. quoted-printable) — skip
+    }
+    const size = richEstimateBase64Bytes(b64);
+    if (size <= 0 || size > RICH_IMG_EACH_MAX_BYTES) return;
+    let total = size;
+    for (const v of out.images.values()) total += v.size;
+    if (total > RICH_IMG_TOTAL_MAX_BYTES) return;
+    try {
+      // Validate decodability without keeping the bytes (CPU-bounded: we
+      // already size-checked, so atob input is <= ~667KB chars).
+      atob(b64.substring(0, Math.min(b64.length, 4 * Math.ceil(RICH_IMG_EACH_MAX_BYTES / 3) + 8)));
+    } catch (e) {
+      return;
+    }
+    const mimeNorm = mime === "image/jpg" ? "image/jpeg" : mime;
+    out.images.set(key, { contentId: cid, mimeType: mimeNorm, b64, size });
+    return;
+  }
+
+  // ---- text/html leaf ----
+  if (mime === "text/html") {
+    const charsetMatch = partHeadersBlob.match(/charset\s*=\s*"?([^";\s\r\n]+)/i)
+      || (parentHeaders ? String(parentHeaders).match(/charset\s*=\s*"?([^";\s\r\n]+)/i) : null);
+    const charset = charsetMatch ? charsetMatch[1].trim().toLowerCase() : "utf-8";
+    const transferEncMatch = partHeadersBlob.match(/content-transfer-encoding\s*:\s*([^\r\n]+)/i)
+      || (parentHeaders ? String(parentHeaders).match(/content-transfer-encoding\s*:\s*([^\r\n]+)/i) : null);
+    const transferEnc = transferEncMatch ? transferEncMatch[1].trim().toLowerCase() : "";
+    let decoded = "";
+    try {
+      if (transferEnc === "base64") {
+        decoded = decodeBase64Content(content, charset) || "";
+      } else if (transferEnc === "quoted-printable" || /=\r?\n/.test(content) || /=[0-9A-F]{2}/i.test(content)) {
+        decoded = decodeQuotedPrintable(content) || "";
+      } else {
+        decoded = content;
+      }
+    } catch (e) {
+      decoded = "";
+    }
+    if (decoded && decoded.trim()) out.htmlParts.push(decoded);
+    return;
+  }
+
+  // ---- text/plain leaf ----
+  if (mime === "text/plain" || mime.startsWith("text/")) {
+    const charsetMatch = partHeadersBlob.match(/charset\s*=\s*"?([^";\s\r\n]+)/i)
+      || (parentHeaders ? String(parentHeaders).match(/charset\s*=\s*"?([^";\s\r\n]+)/i) : null);
+    const charset = charsetMatch ? charsetMatch[1].trim().toLowerCase() : "utf-8";
+    const transferEncMatch = partHeadersBlob.match(/content-transfer-encoding\s*:\s*([^\r\n]+)/i)
+      || (parentHeaders ? String(parentHeaders).match(/content-transfer-encoding\s*:\s*([^\r\n]+)/i) : null);
+    const transferEnc = transferEncMatch ? transferEncMatch[1].trim().toLowerCase() : "";
+    let decoded = "";
+    try {
+      if (transferEnc === "base64") {
+        decoded = decodeBase64Content(content, charset) || "";
+      } else if (transferEnc === "quoted-printable" || /=\r?\n/.test(content) || /=[0-9A-F]{2}/i.test(content)) {
+        decoded = decodeQuotedPrintable(content) || "";
+      } else {
+        decoded = content;
+      }
+    } catch (e) {
+      decoded = "";
+    }
+    if (decoded && decoded.trim()) out.textParts.push(decoded);
+    return;
+  }
+
+  // ---- any other leaf (application/*, audio/*, video/*, message/*, ...):
+  // deliberately dropped. Binary must never enter the visible text body.
+  return;
+}
+
+function richEscapeHtml(s) {
+  return String(s == null ? "" : s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+function richDecodeAttrEntities(s) {
+  if (!s) return "";
+  return String(s)
+    .replace(/&amp;/gi, "&")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'")
+    .replace(/&apos;/gi, "'")
+    .replace(/=3D/gi, "=");
+}
+
+function richIsAllowedHttpUrl(u) {
+  if (!u) return false;
+  const s = richDecodeAttrEntities(String(u)).trim();
+  if (!/^https?:\/\//i.test(s)) return false;
+  if (/[\s<>"']/.test(s)) return false;
+  return true;
+}
+
+// Server-side allowlist HTML sanitizer (layer 1 of defense-in-depth;
+// the client re-validates with DOMParser + allowlist walk and never uses
+// innerHTML for email HTML). Returns {html, remoteImagesBlocked}.
+function sanitizeRichHtml(dirtyHtml, imageMap) {
+  const empty = { html: "", remoteImagesBlocked: 0 };
+  if (!dirtyHtml || typeof dirtyHtml !== "string") return empty;
+  let html = dirtyHtml;
+  if (html.length > RICH_HTML_MAX_CHARS * 2) {
+    html = html.substring(0, RICH_HTML_MAX_CHARS * 2);
+  }
+
+  // 1) Drop whole dangerous blocks INCLUDING their content.
+  html = html.replace(/<!--[\s\S]*?-->/g, " ");
+  html = html.replace(/<!doctype[\s\S]*?>/gi, " ");
+  html = html.replace(/<\?xml[\s\S]*?\?>/gi, " ");
+  html = html.replace(/<!\[CDATA\[[\s\S]*?\]\]>/gi, " ");
+  html = html.replace(/<head\b[^>]*>[\s\S]*?<\/head\s*>/gi, " ");
+  html = html.replace(/<script\b[^>]*>[\s\S]*?<\/script\s*>/gi, " ");
+  html = html.replace(/<style\b[^>]*>[\s\S]*?<\/style\s*>/gi, " ");
+  html = html.replace(/<noscript\b[^>]*>[\s\S]*?<\/noscript\s*>/gi, " ");
+  html = html.replace(/<iframe\b[^>]*>[\s\S]*?<\/iframe\s*>/gi, " ");
+  html = html.replace(/<object\b[^>]*>[\s\S]*?<\/object\s*>/gi, " ");
+  html = html.replace(/<embed\b[^>]*\/?>/gi, " ");
+  html = html.replace(/<applet\b[^>]*>[\s\S]*?<\/applet\s*>/gi, " ");
+  html = html.replace(/<template\b[^>]*>[\s\S]*?<\/template\s*>/gi, " ");
+  html = html.replace(/<svg\b[^>]*>[\s\S]*?<\/svg\s*>/gi, " ");
+  html = html.replace(/<title\b[^>]*>[\s\S]*?<\/title\s*>/gi, " ");
+  html = html.replace(/<meta\b[^>]*\/?>/gi, " ");
+  html = html.replace(/<link\b[^>]*\/?>/gi, " ");
+  html = html.replace(/<base\b[^>]*\/?>/gi, " ");
+  // form controls: drop the tags AND their content where applicable.
+  html = html.replace(/<form\b[^>]*>[\s\S]*?<\/form\s*>/gi, (m) => m.replace(/<[^>]+>/g, " "));
+  html = html.replace(/<select\b[^>]*>[\s\S]*?<\/select\s*>/gi, " ");
+  html = html.replace(/<textarea\b[^>]*>[\s\S]*?<\/textarea\s*>/gi, " ");
+
+  const ALLOWED = {
+    p: 0, div: 0, span: 0, br: 1, a: 0,
+    ul: 0, ol: 0, li: 0, b: 0, i: 0, u: 0, strong: 0, em: 0,
+    table: 0, thead: 0, tbody: 0, tr: 0, td: 0, th: 0,
+    blockquote: 0, pre: 0,
+    h1: 0, h2: 0, h3: 0, h4: 0, h5: 0, h6: 0,
+    img: 1,
+  };
+
+  let remoteImagesBlocked = 0;
+  const images = imageMap instanceof Map ? imageMap : new Map();
+
+  // 2) Tag-by-tag rebuild. Unknown/disallowed tags are dropped but their
+  // inner TEXT is preserved (except blocks removed in step 1).
+  const out = [];
+  const tagRe = /<\/?([a-zA-Z][a-zA-Z0-9]*)\b([^<>]*)>/g;
+  let last = 0;
+  let m;
+  const attrRe = /([a-zA-Z_:][a-zA-Z0-9_.:\-]*)(?:\s*=\s*("[^"]*"|'[^']*'|[^\s"'`=<>]+))?/g;
+  while ((m = tagRe.exec(html)) !== null) {
+    out.push(richEscapeHtml(html.slice(last, m.index)));
+    const isClose = html[m.index + 1] === "/";
+    const tag = m[1].toLowerCase();
+    const attrBlob = m[2] || "";
+    last = m.index + m[0].length;
+
+    if (!Object.prototype.hasOwnProperty.call(ALLOWED, tag)) continue;
+    if (isClose) {
+      if (ALLOWED[tag] === 1) continue; // void tags have no closers
+      out.push("</" + tag + ">");
+      continue;
+    }
+
+    if (tag === "a") {
+      let href = "";
+      let title = "";
+      let am;
+      attrRe.lastIndex = 0;
+      while ((am = attrRe.exec(attrBlob)) !== null) {
+        const an = am[1].toLowerCase();
+        let av = am[2] || "";
+        if (av.length >= 2 && ((av[0] === '"' && av[av.length - 1] === '"') || (av[0] === "'" && av[av.length - 1] === "'"))) {
+          av = av.substring(1, av.length - 1);
+        }
+        if (an.indexOf("on") === 0) continue;
+        if (an === "style") continue;
+        if (an === "href" && !href) href = richDecodeAttrEntities(av).trim();
+        else if (an === "title" && !title) title = av.substring(0, 200);
+      }
+      if (!richIsAllowedHttpUrl(href)) {
+        // Unsafe href: drop the anchor tag but keep its inner text.
+        continue;
+      }
+      out.push('<a href="' + richEscapeHtml(href) + '"' +
+        (title ? ' title="' + richEscapeHtml(title) + '"' : "") +
+        ' target="_blank" rel="noopener noreferrer">');
+      continue;
+    }
+
+    if (tag === "img") {
+      let src = "";
+      let alt = "";
+      let width = "";
+      let height = "";
+      let am;
+      attrRe.lastIndex = 0;
+      while ((am = attrRe.exec(attrBlob)) !== null) {
+        const an = am[1].toLowerCase();
+        let av = am[2] || "";
+        if (av.length >= 2 && ((av[0] === '"' && av[av.length - 1] === '"') || (av[0] === "'" && av[av.length - 1] === "'"))) {
+          av = av.substring(1, av.length - 1);
+        }
+        if (an.indexOf("on") === 0) continue;
+        if (an === "style" || an === "srcset") continue;
+        if (an === "src" && !src) src = av.trim();
+        else if (an === "alt" && !alt) alt = av.substring(0, 200);
+        else if (an === "width" && !width) width = av.trim();
+        else if (an === "height" && !height) height = av.trim();
+      }
+      const srcLow = src.toLowerCase();
+      let dataUrl = "";
+      if (/^cid:/i.test(src)) {
+        const key = richContentIdKey(src.replace(/^cid:/i, ""));
+        const hit = key ? images.get(key) : null;
+        if (!hit) continue; // missing/fake cid -> render nothing, never external
+        dataUrl = "data:" + hit.mimeType + ";base64," + hit.b64;
+      } else if (/^https?:\/\//i.test(src)) {
+        remoteImagesBlocked++; // remote images always blocked (no fetch, no render)
+        continue;
+      } else if (/^data:image\/(png|jpe?g|gif|webp);base64,/i.test(src)) {
+        // Sender-inlined data: image. Allow only small ones.
+        const b64part = src.substring(src.indexOf(",") + 1).replace(/\s/g, "");
+        if (!b64part || b64part.length > 700 * 1024) { remoteImagesBlocked++; continue; }
+        dataUrl = src.replace(/\s/g, "");
+      } else {
+        continue; // javascript:, vbscript:, blob:, file:, data:text/html, ... -> drop
+      }
+      if (dataUrl.length > RICH_HTML_MAX_CHARS) continue;
+      // width/height: digits only (1-4 chars) to avoid CSS injection.
+      if (width && !/^\d{1,4}$/.test(width)) width = "";
+      if (height && !/^\d{1,4}$/.test(height)) height = "";
+      void srcLow;
+      out.push('<img src="' + dataUrl + '"' +
+        (alt ? ' alt="' + richEscapeHtml(alt) + '"' : ' alt=""') +
+        (width ? ' width="' + width + '"' : "") +
+        (height ? ' height="' + height + '"' : "") +
+        ' loading="lazy">');
+      continue;
+    }
+
+    if (tag === "br") {
+      out.push("<br>");
+      continue;
+    }
+
+    // All other allowed tags: no attributes (style/event-safe by construction).
+    out.push("<" + tag + ">");
+  }
+  out.push(richEscapeHtml(html.slice(last)));
+  let safe = out.join("");
+
+  // 3) Defense-in-depth: entity-encoded smuggling of dangerous schemes that
+  // may have survived inside text is inert as text already (we escaped all
+  // text nodes), so nothing more to strip here.
+
+  if (safe.length > RICH_HTML_MAX_CHARS) {
+    safe = safe.substring(0, RICH_HTML_MAX_CHARS);
+  }
+  return { html: safe, remoteImagesBlocked };
+}
+
+// New parallel parser. Returns:
+//   { hasHtml, html, text, inlineImages: [{contentId, mimeType, size}],
+//     remoteImagesBlocked }
+// NEVER throws: on any failure returns {hasHtml:false, ...} so callers can
+// fall back to the frozen bodyText pipeline.
+function parseRichEmail(rawEmail) {
+  const empty = { hasHtml: false, html: "", text: "", inlineImages: [], remoteImagesBlocked: 0 };
+  try {
+    if (!rawEmail || typeof rawEmail !== "string") return empty;
+    // Respect the existing large-email behavior: heavy parsing is skipped
+    // above MAX_PARSE_BYTES (that path uses extractFast). Rich is simply
+    // absent there and the UI falls back to plain bodyText.
+    if (rawEmail.length > MAX_PARSE_BYTES) return empty;
+
+    const raw = rawEmail;
+    let topHeaders = "";
+    let bodyContent = raw;
+    const headerSplit = raw.indexOf("\r\n\r\n");
+    const headerSplitLf = raw.indexOf("\n\n");
+    const splitIdx = (headerSplit !== -1 && (headerSplitLf === -1 || headerSplit < headerSplitLf)) ? headerSplit : headerSplitLf;
+    if (splitIdx !== -1) {
+      topHeaders = raw.substring(0, splitIdx);
+      bodyContent = raw.substring(splitIdx + (raw.startsWith("\r\n", splitIdx) ? 4 : 2));
+    }
+
+    const out = { textParts: [], htmlParts: [], images: new Map() };
+    const boundary = extractBoundary(topHeaders) || extractBoundary(bodyContent);
+    if (boundary) {
+      const parts = splitMimeParts(bodyContent, boundary);
+      if (!parts || parts.length === 0) {
+        richWalkPart(bodyContent, topHeaders, null, 0, out);
+      } else {
+        for (const part of parts) {
+          richWalkPart(part, topHeaders, boundary, 0, out);
+        }
+      }
+    } else {
+      richWalkPart(bodyContent, topHeaders, null, 0, out);
+    }
+
+    let text = "";
+    try {
+      const joined = out.textParts.join("\n\n").trim();
+      text = joined ? cleanText(joined) : "";
+    } catch (e) {
+      text = "";
+    }
+    if (text.length > WEB_DETAIL_BODY_LIMIT) {
+      text = text.substring(0, WEB_DETAIL_BODY_LIMIT);
+    }
+
+    const htmlRaw = out.htmlParts.join("\n").trim();
+    if (!htmlRaw) {
+      return { hasHtml: false, html: "", text, inlineImages: [], remoteImagesBlocked: 0 };
+    }
+    let sanitized;
+    try {
+      sanitized = sanitizeRichHtml(htmlRaw, out.images);
+    } catch (e) {
+      return { hasHtml: false, html: "", text, inlineImages: [], remoteImagesBlocked: 0 };
+    }
+    const inlineImages = [];
+    for (const v of out.images.values()) {
+      inlineImages.push({ contentId: v.contentId, mimeType: v.mimeType, size: v.size });
+      if (inlineImages.length >= RICH_IMG_MAX_COUNT) break;
+    }
+    const html = sanitized.html || "";
+    // hasHtml requires visible text OR a resolved inline image; a bare
+    // tag skeleton with no content is not worth the rich view.
+    let visible = "";
+    try {
+      visible = html.replace(/<[^>]+>/g, " ").replace(/&[a-z]+;/gi, " ").trim();
+    } catch (e) {
+      visible = "";
+    }
+    const hasImg = /<img\b/i.test(html);
+    const hasHtml = !!(html && (visible || hasImg));
+    return {
+      hasHtml,
+      html: hasHtml ? html : "",
+      text,
+      inlineImages,
+      remoteImagesBlocked: sanitized.remoteImagesBlocked || 0,
+    };
+  } catch (e) {
+    return empty;
+  }
+}
+
 function extractBoundary(headerText) {
   if (!headerText) return null;
   const m = headerText.match(/boundary\s*=\s*"?([^";\s\r\n]+)"?/i);
@@ -4426,6 +4927,16 @@ async function apiEmailDetail(env, email, id, lang) {
     date: item.date, body: "", links, otpCode, activationLink,
   }, lang);
   shaped.bodyText = bodyText;
+  // ADDITIVE rich payload (parallel renderer): never touches bodyText/otp/
+  // links above. Built independently from the saved raw MIME; on any
+  // failure the detail still works with bodyText alone.
+  try {
+    shaped.rich = (item.raw && typeof item.raw === "string" && item.raw.length > 0)
+      ? parseRichEmail(item.raw)
+      : { hasHtml: false, html: "", text: "", inlineImages: [], remoteImagesBlocked: 0 };
+  } catch (e) {
+    shaped.rich = { hasHtml: false, html: "", text: "", inlineImages: [], remoteImagesBlocked: 0 };
+  }
   return shaped;
 }
 

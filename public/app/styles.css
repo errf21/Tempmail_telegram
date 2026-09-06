@@ -514,6 +514,49 @@ html[data-theme="dark"] .detail-body a, html[data-theme="auto"] .detail-body a {
 }
 .detail-body a:hover { text-decoration-thickness: 2px; }
 .detail-inline-link { direction: ltr; unicode-bidi: embed; }
+/* ---------- rich email view (additive; plain .detail-body untouched) ---------- */
+.rich-toggle { display: flex; gap: 8px; margin: 0 0 10px; }
+.rich-toggle.hidden { display: none; }
+.chip-active { border-color: var(--accent); font-weight: 700; }
+.detail-rich {
+  font-family: inherit;
+  font-size: clamp(0.9rem, 3.9vw, 0.97rem);
+  line-height: 1.9;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: clamp(14px, 4vw, 18px);
+  max-height: 50dvh;
+  overflow: auto;
+  margin: 0 0 12px;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+.detail-rich.hidden { display: none; }
+.detail-body.hidden { display: none; }
+.detail-rich p, .detail-rich div { margin: 0 0 0.7em; max-width: 100%; }
+.detail-rich h1, .detail-rich h2, .detail-rich h3,
+.detail-rich h4, .detail-rich h5, .detail-rich h6 {
+  margin: 0.9em 0 0.5em; line-height: 1.5; word-break: break-word;
+}
+.detail-rich ul, .detail-rich ol { margin: 0 0 0.7em; padding-inline-start: 1.4em; }
+.detail-rich a {
+  color: var(--accent-strong);
+  font-weight: 600;
+  text-underline-offset: 3px;
+  overflow-wrap: anywhere;
+  word-break: break-all;
+}
+html[data-theme="dark"] .detail-rich a, html[data-theme="auto"] .detail-rich a { color: var(--accent); }
+@media (prefers-color-scheme: light) {
+  html[data-theme="auto"] .detail-rich a { color: var(--accent-strong); }
+}
+.detail-rich table { display: block; max-width: 100%; overflow-x: auto; border-collapse: collapse; margin: 0 0 0.7em; }
+.detail-rich td, .detail-rich th { border: 1px solid var(--border); padding: 6px 10px; }
+.detail-rich blockquote { margin: 0 0 0.7em; padding-inline-start: 12px; border-inline-start: 3px solid var(--border); color: var(--muted); }
+.detail-rich pre { white-space: pre-wrap; word-break: break-word; max-width: 100%; overflow: auto; }
+.detail-rich img.rich-img { max-width: 100%; height: auto; border-radius: 8px; display: block; margin: 8px 0; }
 .footer { text-align: center; font-size: 0.74rem; padding: 18px 14px calc(14px + var(--safe-b)); color: var(--muted); }
 /* Developer credit: subtle, Pulse-compatible, no card, no heavy border. */
 .dev-credit { display: flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: 6px; margin-top: 6px; font-size: 0.74rem; line-height: 1.8; color: var(--muted); min-width: 0; max-width: 100%; }

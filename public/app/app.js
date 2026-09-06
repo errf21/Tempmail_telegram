@@ -30,6 +30,7 @@ const STR = {
     inboxEmptyHint: "ایمیل‌های دریافتی این آدرس اینجا نمایش داده می‌شوند.",
     btnBack: "بازگشت", from: "فرستنده:", date: "تاریخ:", otpLabel: "کد تایید:",
     bodyLabel: "متن پیام:", btnCopyBody: "کپی متن", footer: "تمپ‌میل — ایمیل موقت سریع و امن",
+    viewRich: "نمای غنی", viewPlain: "متن ساده",
     devBy: "توسعه داده شده توسط", verifyLinkLabel: "لینک تأیید عضویت",
     confirmNew: "ایمیل فعلی و پیام‌هایش حذف می‌شوند. ایمیل جدید ساخته شود؟",
     statusLoading: "در حال بارگذاری…", statusLogin: "در حال ورود…",
@@ -65,6 +66,7 @@ const STR = {
     inboxEmptyHint: "Incoming mail for this address will appear here.",
     btnBack: "Back", from: "From:", date: "Date:", otpLabel: "Verification code:",
     bodyLabel: "Message text:", btnCopyBody: "Copy text", footer: "TempMail — fast, secure temporary email",
+    viewRich: "Rich view", viewPlain: "Plain text",
     devBy: "Developed by", verifyLinkLabel: "Verification link",
     confirmNew: "The current email and its messages will be deleted. Create a new email?",
     statusLoading: "Loading…", statusLogin: "Signing in…",
@@ -212,6 +214,143 @@ function renderDetailBody(container, bodyText, inlineSeen) {
   }
   pushText(text.slice(last));
   container.appendChild(frag);
+}
+/* ---------------- rich email view (additive, defense-in-depth layer 2) ----------------
+   The server already allowlist-sanitized d.rich.html (layer 1). The client
+   NEVER uses innerHTML/eval/outerHTML/insertAdjacentHTML for email HTML:
+   it re-parses with DOMParser and rebuilds the DOM node-by-node with
+   createElement/createTextNode, re-checking every tag/attribute/protocol.
+   Remote images are always dropped (no fetch, no tracking). Only
+   server-generated data:image/... URLs (cid: resolved) are allowed.
+   renderDetailBody() above is untouched and stays the plain-text fallback. */
+const RICH_CLIENT_TAGS = {
+  p: 0, div: 0, span: 0, br: 1, a: 0,
+  ul: 0, ol: 0, li: 0, b: 0, i: 0, u: 0, strong: 0, em: 0,
+  table: 0, thead: 0, tbody: 0, tr: 0, td: 0, th: 0,
+  blockquote: 0, pre: 0,
+  h1: 0, h2: 0, h3: 0, h4: 0, h5: 0, h6: 0,
+  img: 1,
+};
+// Subtrees that are skipped ENTIRELY (tag + children): active content,
+// frames, forms/controls, metadata. Anything else unknown keeps its text.
+const RICH_CLIENT_DROP_TREE = {
+  script: 1, style: 1, iframe: 1, object: 1, embed: 1, applet: 1, svg: 1,
+  form: 1, input: 1, button: 1, select: 1, textarea: 1, option: 1,
+  meta: 1, link: 1, base: 1, title: 1, head: 1, noscript: 1, template: 1,
+  video: 1, audio: 1, source: 1, track: 1, canvas: 1, frame: 1, frameset: 1,
+};
+function richClientHttpUrl(u) {
+  if (typeof u !== "string") return "";
+  const s = u.trim();
+  if (!/^https?:\/\//i.test(s)) return "";
+  if (/[\s<>"']/.test(s)) return "";
+  return s;
+}
+function richClientImgSrc(u) {
+  if (typeof u !== "string") return "";
+  const s = u.trim().replace(/\s/g, "");
+  // Only server-resolved inline images. Remote/file/blob/javascript/data-html never pass.
+  if (!/^data:image\/(png|jpe?g|gif|webp);base64,[A-Za-z0-9+/=]+$/i.test(s)) return "";
+  if (s.length > 700 * 1024) return "";
+  return s;
+}
+function isUsableRich(r) {
+  return !!(r && r.hasHtml === true && typeof r.html === "string" && r.html.trim().length > 0);
+}
+// Returns true when something meaningful was rendered, false → caller falls back to plain text.
+function renderRichBody(container, html) {
+  container.textContent = "";
+  if (!html || typeof html !== "string" || !html.trim()) return false;
+  let doc = null;
+  try {
+    doc = new DOMParser().parseFromString(html, "text/html");
+  } catch (_) {
+    return false;
+  }
+  const root = doc && doc.body ? doc.body : null;
+  if (!root) return false;
+  const frag = document.createDocumentFragment();
+  let renderedImgs = 0;
+  // Single recursive walker (defined once below as richBuildKids).
+  function richBuildKids(a, b) {
+    // Allowlist DOM rebuild: tags/attrs/protocols re-validated node by node.
+    const list = a.childNodes;
+    for (let i = 0; i < list.length; i++) {
+      const n = list[i];
+      if (n.nodeType === 3) {
+        if (n.nodeValue) b.appendChild(document.createTextNode(n.nodeValue));
+        continue;
+      }
+      if (n.nodeType !== 1) continue;
+      const tag = (n.tagName || "").toLowerCase();
+      if (RICH_CLIENT_DROP_TREE[tag]) continue;
+      if (tag === "a" && RICH_CLIENT_TAGS.a === 0) {
+        const href = richClientHttpUrl(n.getAttribute("href") || "");
+        if (href) {
+          const a2 = document.createElement("a");
+          a2.href = href;
+          a2.target = "_blank";
+          a2.rel = "noopener noreferrer";
+          a2.dir = "ltr";
+          a2.className = "detail-inline-link";
+          const ti = (n.getAttribute("title") || "").slice(0, 200);
+          if (ti) a2.title = ti;
+          richBuildKids(n, a2);
+          b.appendChild(a2);
+        } else {
+          const sp = document.createElement("span");
+          richBuildKids(n, sp);
+          b.appendChild(sp);
+        }
+        continue;
+      }
+      if (tag === "img") {
+        if (renderedImgs >= 10) continue;
+        const src = richClientImgSrc(n.getAttribute("src") || "");
+        if (!src) continue;
+        const img = document.createElement("img");
+        img.src = src;
+        img.alt = (n.getAttribute("alt") || "").slice(0, 200);
+        img.loading = "lazy";
+        const w = (n.getAttribute("width") || "").trim();
+        const h = (n.getAttribute("height") || "").trim();
+        if (/^\d{1,4}$/.test(w)) img.width = parseInt(w, 10);
+        if (/^\d{1,4}$/.test(h)) img.height = parseInt(h, 10);
+        img.className = "rich-img";
+        b.appendChild(img);
+        renderedImgs++;
+        continue;
+      }
+      if (Object.prototype.hasOwnProperty.call(RICH_CLIENT_TAGS, tag)) {
+        if (RICH_CLIENT_TAGS[tag] === 1) { b.appendChild(document.createElement("br")); continue; }
+        const node = document.createElement(tag);
+        richBuildKids(n, node);
+        b.appendChild(node);
+        continue;
+      }
+      richBuildKids(n, b);
+    }
+  }
+  richBuildKids(root, frag);
+  const text = (frag.textContent || "").trim();
+  if (!text && !frag.querySelector("img")) return false;
+  container.appendChild(frag);
+  return true;
+}
+// Toggle between the additive rich view and the untouched plain-text view.
+function setDetailMode(mode) {
+  const richOn = mode === "rich";
+  const richBox = $("#detail-rich");
+  const plainBox = $("#detail-body");
+  const tog = $("#detail-view-toggle");
+  const bR = $("#btn-view-rich");
+  const bP = $("#btn-view-plain");
+  if (richBox) richBox.classList.toggle("hidden", !richOn);
+  if (plainBox) plainBox.classList.toggle("hidden", richOn);
+  if (bR) bR.classList.toggle("chip-active", richOn);
+  if (bP) bP.classList.toggle("chip-active", !richOn);
+  if (tog) tog.classList.remove("hidden");
+  try { S.detailMode = richOn ? "rich" : "plain"; } catch (_) {}
 }
 async function copyText(txt) {
   try {
@@ -711,6 +850,29 @@ function renderDetail(d) {
   const extra = $("#detail-links-extra");
   extra.textContent = "";
   const inlineSeen = {};
+  // ADDITIVE rich view: server-sanitized d.rich.html is re-validated and
+  // rebuilt node-by-node via renderRichBody (no innerHTML). The plain-text
+  // renderDetailBody path below is UNCHANGED and stays the fallback.
+  const richBox = $("#detail-rich");
+  const plainBox = $("#detail-body");
+  const tog = $("#detail-view-toggle");
+  let richShown = false;
+  if (richBox) richBox.textContent = "";
+  if (isUsableRich(d.rich)) {
+    try {
+      richShown = renderRichBody(richBox, d.rich.html);
+    } catch (_) {
+      richShown = false;
+    }
+  }
+  if (tog) tog.classList.toggle("hidden", !richShown);
+  if (richShown) {
+    setDetailMode("rich");
+  } else {
+    if (tog) tog.classList.add("hidden");
+    if (richBox) richBox.classList.add("hidden");
+    if (plainBox) plainBox.classList.remove("hidden");
+  }
   renderDetailBody($("#detail-body"), d.bodyText || "", inlineSeen);
   const structured = collectDetailLinks(d);
   const missing = structured.filter((e) => !inlineSeen[normDetailUrl(e.url)]);
@@ -814,6 +976,8 @@ document.addEventListener("DOMContentLoaded", () => {
   $("#btn-copy-otp").addEventListener("click", () => copyText($("#detail-otp").textContent));
   $("#btn-copy-body").addEventListener("click", () => copyText((S.currentDetail && S.currentDetail.bodyText) || $("#detail-body").textContent));
   $("#btn-back").addEventListener("click", backToMain);
+  $("#btn-view-rich").addEventListener("click", () => setDetailMode("rich"));
+  $("#btn-view-plain").addEventListener("click", () => setDetailMode("plain"));
   $("#btn-logout").addEventListener("click", async () => {
     // Web logout: ask the server to clear the HttpOnly cookie (JS cannot
     // clear it), drop the in-memory/stored token, and start a fresh
