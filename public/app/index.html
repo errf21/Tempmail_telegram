@@ -18,8 +18,8 @@
         <span class="brand-name" data-i18n="brandName">تمپ‌میل</span>
       </div>
       <div class="topbar-actions">
-        <button id="btn-theme" class="icon-btn" type="button" aria-label="theme">🌙</button>
-        <button id="btn-lang" class="icon-btn lang-btn" type="button">EN</button>
+        <button id="btn-theme" class="icon-btn" type="button" aria-label="Toggle theme">🌙</button>
+        <button id="btn-lang" class="icon-btn lang-btn" type="button" aria-label="Change language">EN</button>
       </div>
     </header>
 
@@ -32,10 +32,15 @@
            ensures a web session and shows the dashboard directly. This
            view is only a fallback (e.g. server unreachable at boot) and
            the explicit account-recovery path via recovery token. -->
-      <section id="view-login" class="view hidden">
+      <section id="view-login" class="view hidden" aria-labelledby="login-title">
         <div class="hero-mini">
-          <div class="hero-mini-mark" aria-hidden="true">✉️</div>
-          <h1 data-i18n="loginTitle">ایمیل موقت شما</h1>
+          <div class="hero-mini-mark" aria-hidden="true">
+            <svg viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <rect x="6" y="12" width="36" height="26" rx="6" fill="none" />
+              <path d="M8 15l16 12 16-12" />
+            </svg>
+          </div>
+          <h1 id="login-title" data-i18n="loginTitle">ایمیل موقت شما</h1>
           <p class="muted" data-i18n="loginDesc">بدون ثبت‌نام، یک آدرس ایمیل موقت بسازید و کدهای تایید را فوری دریافت کنید.</p>
         </div>
         <div class="card">
@@ -52,45 +57,67 @@
       </section>
 
       <!-- ============ MAIN (dashboard + inbox) ============ -->
-      <section id="view-main" class="view hidden">
+      <section id="view-main" class="view hidden" aria-label="dashboard">
         <div class="card email-hero">
-          <div class="email-top">
-            <span class="email-label" data-i18n="yourEmail">آدرس ایمیل شما</span>
-            <span id="email-live" class="live-dot hidden" aria-hidden="true"></span>
-          </div>
-          <code id="current-email" class="email-addr" dir="ltr">…</code>
-          <div id="email-meta" class="meta muted"></div>
-          <!-- Empty state: authenticated but no active email -->
-          <div id="no-email-box" class="no-email hidden">
-            <div class="no-email-icon" aria-hidden="true">📭</div>
-            <p class="no-email-text" data-i18n="noEmailText">هنوز ایمیلی ندارید. با یک ضربه یکی بسازید.</p>
-          </div>
-          <button id="btn-create-main" class="btn primary block cta" type="button">➕ <span data-i18n="btnCreate">ساخت ایمیل جدید</span></button>
-          <!-- Inline confirm (replaces native confirm dialog) -->
-          <div id="confirm-box" class="confirm-box hidden">
-            <p class="confirm-text" data-i18n="confirmNew">ایمیل فعلی و پیام‌هایش حذف می‌شوند. ایمیل جدید ساخته شود؟</p>
-            <div class="btn-row">
-              <button id="btn-confirm-yes" class="btn primary" type="button" data-i18n="btnConfirmYes">بله، بساز</button>
-              <button id="btn-confirm-no" class="btn ghost" type="button" data-i18n="btnCancel">انصراف</button>
+          <div class="email-hero-inner">
+            <div class="email-top">
+              <span class="email-label" data-i18n="yourEmail">آدرس ایمیل شما</span>
+              <span id="email-live" class="live-dot hidden" aria-hidden="true"></span>
             </div>
-          </div>
-          <div class="action-row">
-            <button id="btn-copy-email" class="chip" type="button">📋 <span data-i18n="btnCopy">کپی</span></button>
-            <button id="btn-refresh" class="chip" type="button">🔄 <span data-i18n="btnRefresh">به‌روزرسانی</span></button>
-            <button id="btn-restore" class="chip" type="button">♻️ <span data-i18n="btnRestore">بازگردانی</span></button>
-          </div>
-          <div id="restore-box" class="restore-box hidden">
-            <input id="input-restore" class="text-input mono" type="text" inputmode="latin"
-                   placeholder="tmp_xxxxxx" autocomplete="off" spellcheck="false" dir="ltr" />
-            <div class="btn-row">
-              <button id="btn-do-restore" class="btn primary" type="button" data-i18n="btnDoRestore">بازیابی</button>
-              <button id="btn-cancel-restore" class="btn ghost" type="button" data-i18n="btnCancel">انصراف</button>
+            <code id="current-email" class="email-addr" dir="ltr">…</code>
+            <div id="email-meta" class="meta muted"></div>
+            <!-- Empty state: authenticated but no active email -->
+            <div id="no-email-box" class="no-email hidden">
+              <div class="no-email-art" aria-hidden="true">
+                <svg viewBox="0 0 64 64" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <rect x="10" y="18" width="44" height="30" rx="8" />
+                  <path d="M13 22l19 14 19-14" />
+                </svg>
+              </div>
+              <p class="no-email-text" data-i18n="noEmailText">هنوز ایمیلی ندارید. با یک ضربه یکی بسازید.</p>
             </div>
-          </div>
-          <div id="new-token-box" class="token-box hidden">
-            <div class="field-label" data-i18n="newTokenLabel">توکن ایمیل جدید — آن را نگه دارید:</div>
-            <code id="new-token" class="token-val" dir="ltr"></code>
-            <button id="btn-copy-new-token" class="btn secondary small" type="button">📋 <span data-i18n="btnCopy">کپی</span></button>
+            <button id="btn-create-main" class="btn primary block cta" type="button">
+              <svg class="icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M10 4v12M4 10h12" /></svg>
+              <span data-i18n="btnCreate">ساخت ایمیل جدید</span>
+            </button>
+            <!-- Inline confirm (replaces native confirm dialog) -->
+            <div id="confirm-box" class="confirm-box hidden">
+              <p class="confirm-text" data-i18n="confirmNew">ایمیل فعلی و پیام‌هایش حذف می‌شوند. ایمیل جدید ساخته شود؟</p>
+              <div class="btn-row">
+                <button id="btn-confirm-yes" class="btn primary" type="button" data-i18n="btnConfirmYes">بله، بساز</button>
+                <button id="btn-confirm-no" class="btn ghost" type="button" data-i18n="btnCancel">انصراف</button>
+              </div>
+            </div>
+            <div class="action-row">
+              <button id="btn-copy-email" class="chip" type="button">
+                <svg class="icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="7" y="7" width="9" height="9" rx="2" /><path d="M13 7V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h2" /></svg>
+                <span data-i18n="btnCopy">کپی</span>
+              </button>
+              <button id="btn-refresh" class="chip" type="button">
+                <svg class="icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M16 10a6 6 0 1 1-1.8-4.3M16 3v4h-4" /></svg>
+                <span data-i18n="btnRefresh">به‌روزرسانی</span>
+              </button>
+              <button id="btn-restore" class="chip" type="button">
+                <svg class="icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 8a6 6 0 0 1 10.2-3M16 12a6 6 0 0 1-10.2 3M14 3v3h-3M6 17v-3h3" /></svg>
+                <span data-i18n="btnRestore">بازگردانی</span>
+              </button>
+            </div>
+            <div id="restore-box" class="restore-box hidden">
+              <input id="input-restore" class="text-input mono" type="text" inputmode="latin"
+                     placeholder="tmp_xxxxxx" autocomplete="off" spellcheck="false" dir="ltr" />
+              <div class="btn-row">
+                <button id="btn-do-restore" class="btn primary" type="button" data-i18n="btnDoRestore">بازیابی</button>
+                <button id="btn-cancel-restore" class="btn ghost" type="button" data-i18n="btnCancel">انصراف</button>
+              </div>
+            </div>
+            <div id="new-token-box" class="token-box hidden">
+              <div class="field-label" data-i18n="newTokenLabel">توکن ایمیل جدید — آن را نگه دارید:</div>
+              <code id="new-token" class="token-val" dir="ltr"></code>
+              <button id="btn-copy-new-token" class="btn secondary small" type="button">
+                <svg class="icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="7" y="7" width="9" height="9" rx="2" /><path d="M13 7V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h2" /></svg>
+                <span data-i18n="btnCopy">کپی</span>
+              </button>
+            </div>
           </div>
         </div>
 
@@ -100,27 +127,45 @@
         </div>
         <div id="inbox-list" class="inbox-list"></div>
         <div id="inbox-empty" class="empty hidden">
-          <div class="empty-icon" aria-hidden="true">📥</div>
+          <div class="empty-art" aria-hidden="true">
+            <svg viewBox="0 0 72 72" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <rect x="12" y="24" width="48" height="30" rx="9" />
+              <path d="M15 28l21 15 21-15" />
+              <circle cx="52" cy="18" r="7" />
+              <path d="M52 15v6M49 18h6" />
+            </svg>
+          </div>
           <p class="empty-title" data-i18n="inboxEmpty">صندوق ورودی خالی است</p>
           <p class="hint" data-i18n="inboxEmptyHint">ایمیل‌های دریافتی این آدرس اینجا نمایش داده می‌شوند.</p>
         </div>
       </section>
 
       <!-- ============ DETAIL ============ -->
-      <section id="view-detail" class="view hidden">
-        <button id="btn-back" class="btn ghost small" type="button">→ <span data-i18n="btnBack">بازگشت</span></button>
-        <article class="card">
-          <div id="detail-service" class="detail-service"></div>
-          <h2 id="detail-subject" class="detail-subject"></h2>
-          <div class="meta-grid">
-            <div><span class="muted" data-i18n="from">فرستنده:</span> <code id="detail-from" class="mono" dir="auto"></code></div>
-            <div><span class="muted" data-i18n="date">تاریخ:</span> <span id="detail-date"></span></div>
-          </div>
+      <section id="view-detail" class="view hidden" aria-label="email detail">
+        <div class="detail-topbar">
+          <button id="btn-back" class="btn ghost small" type="button">
+            <svg class="icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 4l-5 6 5 6M3 10h13" /></svg>
+            <span data-i18n="btnBack">بازگشت</span>
+          </button>
+          <span class="spacer" aria-hidden="true"></span>
+        </div>
+        <article class="card mail">
+          <header class="mail-head">
+            <div id="detail-service" class="detail-service"></div>
+            <h2 id="detail-subject" class="detail-subject"></h2>
+            <div class="meta-grid">
+              <div><span class="muted" data-i18n="from">فرستنده:</span> <code id="detail-from" class="mono" dir="auto"></code></div>
+              <div><span class="muted" data-i18n="date">تاریخ:</span> <span id="detail-date"></span></div>
+            </div>
+          </header>
           <div id="detail-otp-box" class="otp-box hidden">
             <div class="field-label" data-i18n="otpLabel">کد تایید:</div>
             <div class="otp-row">
               <code id="detail-otp" class="otp-val" dir="ltr"></code>
-              <button id="btn-copy-otp" class="btn secondary small" type="button">📋 <span data-i18n="btnCopy">کپی</span></button>
+              <button id="btn-copy-otp" class="btn secondary small" type="button">
+                <svg class="icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="7" y="7" width="9" height="9" rx="2" /><path d="M13 7V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h2" /></svg>
+                <span data-i18n="btnCopy">کپی</span>
+              </button>
             </div>
           </div>
           <div id="detail-link-box" class="link-box hidden">
@@ -130,7 +175,10 @@
           <h3 class="field-label" data-i18n="bodyLabel">متن پیام:</h3>
           <pre id="detail-body" class="detail-body" dir="auto"></pre>
           <div class="btn-row">
-            <button id="btn-copy-body" class="btn secondary small" type="button">📋 <span data-i18n="btnCopyBody">کپی متن</span></button>
+            <button id="btn-copy-body" class="btn secondary small" type="button">
+              <svg class="icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="7" y="7" width="9" height="9" rx="2" /><path d="M13 7V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h2" /></svg>
+              <span data-i18n="btnCopyBody">کپی متن</span>
+            </button>
           </div>
         </article>
       </section>
