@@ -2,7 +2,7 @@
  * Tests for the Web App + Telegram Mini App API (/api/v1/*).
  *
  * Covers the 16 required API behaviors:
- *   1. Telegram initData validation (valid accepted)
+ *   1. Telegram initData validation (first-time -> pending, returning -> same email)
  *   2. invalid initData rejection (tampered / expired / missing hash)
  *   3. recovery token authentication
  *   4. unauthorized request rejection
@@ -122,23 +122,40 @@ check("15m. wrong method unauthenticated -> 401 (auth gate is first by design)",
   (await callApi("POST", "/api/v1/me")).status === 401);
 
 // ================= 1+2. initData validation =================================
+// Seamless login (empty state + Create): a validated Mini App user WITHOUT
+// a prior session gets a PENDING token (200, email:null, isNew:true) —
+// never a recovery-token gate. The first POST /emails with that token
+// provisions the account; repeat logins resolve the same email.
 const initOk = signInitData(tgFields(777001));
-// No bot session yet -> no_session (the Mini App never provisions).
-const rNoSession = await callApi("POST", "/api/v1/auth/telegram", { body: { initData: initOk } });
-check("1. Mini App without bot session -> 404 no_session",
-  rNoSession.status === 404 && rNoSession.json && rNoSession.json.error === "no_session");
-check("1. no_session issues no sessionToken",
-  !(rNoSession.json && rNoSession.json.sessionToken));
-check("1. no_session creates NO session/email in D1",
+const rPending = await callApi("POST", "/api/v1/auth/telegram", { body: { initData: initOk } });
+check("1. Mini App first-time -> 200 pending (no token gate)",
+  rPending.status === 200 && rPending.json && rPending.json.user && rPending.json.user.email === null);
+check("1. pending marks isNew:true", rPending.json && rPending.json.isNew === true);
+check("1. pending issues a sessionToken", !!(rPending.json && rPending.json.sessionToken));
+check("1. pending creates NO session/email row yet",
   (await mod.db.getSession(env, "777001")) === null);
+const pendingToken = rPending.json.sessionToken;
+const rMePending = await callApi("GET", "/api/v1/me", { token: pendingToken });
+check("1. pending /me reports email:null (empty state)",
+  rMePending.status === 200 && rMePending.json && rMePending.json.email === null);
+const rInboxPending = await callApi("GET", "/api/v1/inbox", { token: pendingToken });
+check("1. pending inbox reads empty",
+  rInboxPending.status === 200 && Array.isArray(rInboxPending.json.items) && rInboxPending.json.items.length === 0);
 
-// The user creates an email via the bot first (single provisioning authority).
-await mod.db.upsertSession(env, "777001", "auser@example.com", "2026-01-02", "tmp_aaa111", "fa");
+// First-time user taps Create: the pending token provisions the account.
+const rProvision = await callApi("POST", "/api/v1/emails", { token: pendingToken });
+check("1. pending POST /emails provisions first email",
+  rProvision.status === 200 && /@example\.com$/.test((rProvision.json && rProvision.json.email) || ""));
+const firstEmail = rProvision.json.email;
+
+// Returning Mini App login resolves the SAME email (no duplicates).
 const rAuth1 = await callApi("POST", "/api/v1/auth/telegram", { body: { initData: initOk } });
 check("1. valid initData + existing session accepted (200)", rAuth1.status === 200);
 check("1. sessionToken issued", !!(rAuth1.json && rAuth1.json.sessionToken));
-check("1. auth resolves the bot-created email",
-  !!(rAuth1.json && rAuth1.json.user && rAuth1.json.user.email === "auser@example.com"));
+check("1. returning auth resolves the SAME provisioned email (no duplicate)",
+  !!(rAuth1.json && rAuth1.json.user && rAuth1.json.user.email === firstEmail));
+check("1. returning auth marks isNew:false",
+  rAuth1.json && rAuth1.json.isNew === false);
 check("1. auth/telegram never echoes recoveryToken",
   !(rAuth1.json && ("recoveryToken" in rAuth1.json)));
 check("1. Set-Cookie is HttpOnly and hides secrets",
@@ -284,7 +301,7 @@ const rWrongOwner = await callApi("POST", "/api/v1/emails/restore", {
 check("restore with another chat's token -> 403 wrong_owner",
   rWrongOwner.status === 403 && rWrongOwner.json && rWrongOwner.json.error === "wrong_owner");
 check("wrong_owner attempt does not disturb the caller's session",
-  (await mod.db.getSession(env, "777001")).email === "auser@example.com");
+  (await mod.db.getSession(env, "777001")).email === firstEmail);
 
 // ================= 11. language ==============================================
 const rLangGet = await callApi("GET", "/api/v1/settings/language", { token: webTokenB });
@@ -294,9 +311,18 @@ check("11. lang PUT fa", rLangPut.status === 200 && rLangPut.json.lang === "fa")
 check("11. lang PUT rejects garbage",
   (await callApi("PUT", "/api/v1/settings/language", { token: webTokenB, body: { lang: "de" } })).status === 400);
 
-// ================= health =====================================================
+// ================= health + standalone web session coexists =================
 const rHealth = await callApi("GET", "/api/v1/health");
 check("health ok without auth", rHealth.status === 200 && rHealth.json.ok === true);
+const rWeb = await callApi("POST", "/api/v1/web/session");
+check("web session ensure works without Telegram",
+  rWeb.status === 200 && !!(rWeb.json && rWeb.json.sessionToken));
+check("web identity uses the web_ namespace (never numeric Telegram ids)",
+  (await mod.verifySessionToken(env, rWeb.json.sessionToken)).startsWith("web_"));
+check("web session does not disturb Telegram sessions",
+  (await mod.db.getSession(env, "777001")).email === firstEmail);
+check("web session Set-Cookie is HttpOnly",
+  (rWeb.headers.get("set-cookie") || "").includes("HttpOnly"));
 
 // ================= 14. no secret leakage ======================================
 const allJson = JSON.stringify([rAuth1.json, rAuthB.json, rMe.json, rInboxB.json, rDetail.json, rAp.json, rCreate.json, rHealth.json]);

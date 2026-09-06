@@ -27,7 +27,11 @@
       <!-- Global status line (loading / error) -->
       <div id="status" class="status hidden" role="status"></div>
 
-      <!-- ============ LOGIN (browser mode / no_session) ============ -->
+      <!-- ============ RECOVERY (secondary, explicit choice only) ============ -->
+      <!-- The normal website flow never lands here on its own: boot()
+           ensures a web session and shows the dashboard directly. This
+           view is only a fallback (e.g. server unreachable at boot) and
+           the explicit account-recovery path via recovery token. -->
       <section id="view-login" class="view hidden">
         <div class="hero-mini">
           <div class="hero-mini-mark" aria-hidden="true">✉️</div>
@@ -139,3 +143,9 @@
   <noscript><p style="padding:2rem;text-align:center">JavaScript is required / جاوااسکریپت لازم است.</p></noscript>
 </body>
 </html>
+
+
+<!-- LOCAL-TEST-NEW -->
+
+
+<!-- LOCAL-TEST-NEW -->

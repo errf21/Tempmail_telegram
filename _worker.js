@@ -4131,10 +4131,34 @@ async function validateTelegramInitData(initData, botToken) {
     if (!/^\d+$/.test(userId)) return { ok: false, reason: "bad_user" };
     // For a private Mini App the chat identity IS the Telegram user id —
     // the same id the bot sees as message.chat.id in DMs.
-    return { ok: true, chatId: userId, userId };
+    // Language hint for first-time provisioning (never trusted for identity).
+    let lang = "fa";
+    try {
+      const lc = String((user && user.language_code) || "").toLowerCase();
+      if (lc.startsWith("en")) lang = "en";
+    } catch (_) { lang = "fa"; }
+    return { ok: true, chatId: userId, userId, lang };
   } catch (e) {
     return { ok: false, reason: "exception" };
   }
+}
+
+// ---- standalone web identities (normal website, no Telegram) --------------
+// A web user is identified by "web_" + base64url(128 crypto-random bits).
+// The id lives in the SAME sessions.chat_id TEXT PRIMARY KEY as Telegram
+// users (no migration, no new table): every accessor binds String(chatId),
+// and the numeric-only check exists solely inside the Telegram validators,
+// so the "web_" prefix can never collide with a Telegram user id.
+// Ownership, inbox scoping, recovery-token and archive logic are all keyed
+// by chat_id/email and therefore work unchanged for web identities.
+function isWebChatId(chatId) {
+  return typeof chatId === "string" && chatId.startsWith("web_");
+}
+
+function generateWebChatId() {
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  return "web_" + webB64UrlEncode(bytes);
 }
 
 // ---- stateless session tokens (HMAC-signed, no D1 storage) ----------------
@@ -4215,17 +4239,30 @@ async function readJsonBody(request) {
   }
 }
 
-// Resolve the caller's identity server-side. Returns { chatId, session }
-// or null (caller gets 401). The chat_id NEVER comes from the client.
+// Resolve the caller's identity server-side. Returns
+// { chatId, session, pending } or null (caller gets 401).
+// The chat_id NEVER comes from the client — it only comes from a
+// verified HMAC session token. When the token verifies but no D1 session
+// row exists yet (first-time Telegram user, empty state + Create flow),
+// session is null and pending is true instead of rejecting with 401.
+// Each route below decides what a pending identity may do: /me reports
+// email:null, POST /emails provisions the first email, inbox reads as
+// empty. Ownership scoping is unchanged once a row exists.
 async function requireWebSession(request, env) {
   const token = getBearerToken(request);
   if (!token) return null;
   const chatId = await verifySessionToken(env, token);
-  if (!chatId) return null;
+  if (!chatId) {
+    // Diagnostic signal only (Mini App /me-after-auth 401 investigation):
+    // a presented token failed verification. Never log the token itself
+    // or any identity material — just the event.
+    try { console.warn("[web-session] presented session token failed verification"); } catch (_) {}
+    return null;
+  }
   let session = null;
   try { session = await db.getSession(env, chatId); } catch (e) { session = null; }
-  if (!session) return null;
-  return { chatId: String(chatId), session };
+  if (!session) return { chatId: String(chatId), session: null, pending: true };
+  return { chatId: String(chatId), session, pending: false };
 }
 
 function webNowStr() {
@@ -4399,6 +4436,53 @@ async function handleWebApi(request, env, url) {
       return apiJson({ ok: true, domain: env.DOMAIN || "", time: new Date().toISOString() });
     }
 
+    // -- WEB SESSION: standalone website identity (no Telegram) -------------
+    // Idempotent ensure: a browser holding a valid web identity token
+    // (HttpOnly cookie or Bearer) gets it back; otherwise a fresh
+    // cryptographically-random web identity is issued. No Telegram
+    // account, Login Widget, or recovery token is required. The identity
+    // carries no email until the first POST /emails (empty state + Create).
+    if (pathname === "/api/v1/web/session") {
+      if (request.method !== "POST") return apiErr("method_not_allowed", 405);
+      const existingToken = getBearerToken(request);
+      if (existingToken) {
+        const existingChatId = await verifySessionToken(env, existingToken);
+        if (existingChatId && isWebChatId(existingChatId)) {
+          const existing = await db.getSession(env, existingChatId);
+          if (existing) {
+            const user = { email: existing.email, createdAt: existing.createdAt, lang: existing.lang === "en" ? "en" : "fa" };
+            return apiJson({ sessionToken: existingToken, user, isNew: false }, 200, { "Set-Cookie": sessionCookieHeader(existingToken) });
+          }
+          const user = { email: null, createdAt: null, lang: "fa" };
+          return apiJson({ sessionToken: existingToken, user, isNew: true }, 200, { "Set-Cookie": sessionCookieHeader(existingToken) });
+        }
+        // A Telegram token presented here is NOT a web identity: fall
+        // through and issue a separate web identity instead of reusing it,
+        // so the two namespaces never merge.
+      }
+      let webId = generateWebChatId();
+      let attempts = 0;
+      while (await db.getSession(env, webId)) {
+        webId = generateWebChatId();
+        if (++attempts > 8) return apiErr("internal_error", 500);
+      }
+      const token = await issueSessionToken(env, webId);
+      const user = { email: null, createdAt: null, lang: "fa" };
+      return apiJson({ sessionToken: token, user, isNew: true }, 200, { "Set-Cookie": sessionCookieHeader(token) });
+    }
+
+    // -- WEB LOGOUT: forget the browser identity ---------------------------
+    // Clears the HttpOnly session cookie (JS cannot clear HttpOnly cookies
+    // itself). The D1 row is left intact so a saved recovery token can
+    // still restore the abandoned email; it simply becomes unreachable
+    // from this browser. No auth required — it only destroys state.
+    if (pathname === "/api/v1/web/logout") {
+      if (request.method !== "POST") return apiErr("method_not_allowed", 405);
+      return apiJson({ ok: true }, 200, {
+        "Set-Cookie": "tm_session=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0",
+      });
+    }
+
     // -- AUTH: Telegram Mini App -------------------------------------------
     if (pathname === "/api/v1/auth/telegram") {
       if (request.method !== "POST") return apiErr("method_not_allowed", 405);
@@ -4411,15 +4495,24 @@ async function handleWebApi(request, env, url) {
         return apiErr(check.reason === "expired" ? "expired" : "invalid_init_data", 401);
       }
       if (!isPublicAccess(env, check.userId)) return apiErr("forbidden", 403);
-      // The Mini App never provisions: the bot is the single authority
-      // that creates emails. A Telegram user without a bot session gets
-      // no_session and the frontend guides them to the bot.
+      // Seamless login (empty state + Create): a validated Telegram user
+      // without a session row yet gets a PENDING session token (no email).
+      // The frontend lands on the dashboard empty state; the first
+      // POST /emails with this token provisions the account. No recovery
+      // token is ever required. Returning users resolve their existing row
+      // so no duplicate email is created.
       const session = await db.getSession(env, check.chatId);
-      if (!session) return apiErr("no_session", 404);
       const token = await issueSessionToken(env, check.chatId);
+      if (!session) {
+        const langVal = (check.lang === "en") ? "en" : "fa";
+        const user = { email: null, createdAt: null, lang: langVal };
+        return apiJson({ sessionToken: token, user, isNew: true }, 200, { "Set-Cookie": sessionCookieHeader(token) });
+      }
       const user = { email: session.email, createdAt: session.createdAt, lang: session.lang === "en" ? "en" : "fa" };
-      return apiJson({ sessionToken: token, user }, 200, { "Set-Cookie": sessionCookieHeader(token) });
+      return apiJson({ sessionToken: token, user, isNew: false }, 200, { "Set-Cookie": sessionCookieHeader(token) });
     }
+
+    // -- AUTH: recovery token (browser + Mini App secondary path) ----------
 
     // -- AUTH: recovery token (plain browser) -------------------------------
     if (pathname === "/api/v1/auth/token") {
@@ -4436,13 +4529,20 @@ async function handleWebApi(request, env, url) {
     }
 
     // -- everything below requires a verified session ------------------------
+    // A verified token with no D1 row yet is a PENDING first-time identity
+    // (see /auth/telegram + /auth/widget). Pending callers may read an
+    // empty shell (/me with email:null, empty inbox) and may provision via
+    // POST /emails. Ownership scoping below is unchanged for full sessions.
     const authed = await requireWebSession(request, env);
     if (!authed) return apiErr("unauthorized", 401);
-    const { chatId, session } = authed;
-    const lang = session.lang === "en" ? "en" : "fa";
+    const { chatId, session, pending } = authed;
+    const lang = session ? (session.lang === "en" ? "en" : "fa") : "fa";
 
     if (pathname === "/api/v1/me") {
       if (request.method !== "GET") return apiErr("method_not_allowed", 405);
+      if (pending || !session) {
+        return apiJson({ email: null, createdAt: null, lang, inboxCount: 0, pending: true });
+      }
       const items = await db.listInbox(env, session.email);
       return apiJson({
         email: session.email,
@@ -4454,6 +4554,7 @@ async function handleWebApi(request, env, url) {
 
     if (pathname === "/api/v1/emails/current") {
       if (request.method !== "GET") return apiErr("method_not_allowed", 405);
+      if (pending || !session) return apiJson({ email: null, createdAt: null, pending: true });
       return apiJson({ email: session.email || null, createdAt: session.createdAt || null });
     }
 
@@ -4490,12 +4591,14 @@ async function handleWebApi(request, env, url) {
       let limit = parseInt(url.searchParams.get("limit") || "20", 10);
       if (!Number.isFinite(limit)) limit = 20;
       limit = Math.max(1, Math.min(20, limit));
+      if (pending || !session) return apiJson({ items: [] });
       const items = await db.listInbox(env, session.email);
       return apiJson({ items: items.slice(0, limit).map((it) => apiPublicInboxItem(it, lang)) });
     }
 
     if (pathname.startsWith("/api/v1/inbox/")) {
       if (request.method !== "GET") return apiErr("method_not_allowed", 405);
+      if (pending || !session) return apiErr("not_found", 404);
       const id = decodeURIComponent(pathname.substring("/api/v1/inbox/".length).split("/")[0] || "");
       if (!id) return apiErr("invalid_request", 400);
       const detail = await apiEmailDetail(env, session.email, id, lang);
@@ -4510,6 +4613,7 @@ async function handleWebApi(request, env, url) {
         if (body.__invalid || body.__tooLarge) return apiErr("invalid_request", 400);
         const next = String(body.lang || "").toLowerCase();
         if (next !== "fa" && next !== "en") return apiErr("invalid_lang", 400);
+        if (pending || !session) return apiErr("no_session", 404);
         await db.setLang(env, chatId, next);
         return apiJson({ lang: next });
       }

@@ -30,6 +30,9 @@ const STR = {
     statusCopied: "کپی شد ✓", statusRefreshed: "به‌روزرسانی شد ✓",
     statusCreated: "ایمیل جدید ساخته شد ✓", statusRestored: "ایمیل بازیابی شد ✓",
     statusLang: "زبان تغییر کرد ✓", errNetwork: "خطای ارتباط با سرور. دوباره تلاش کنید.",
+    errExpiredTg: "نشست تلگرام منقضی شده است. مینی‌اپ را ببندید و دوباره باز کنید.",
+    errForbiddenTg: "دسترسی به این ربات ندارید.",
+    errInvalidTg: "احراز هویت تلگرام ناموفق بود. مینی‌اپ را ببندید و دوباره باز کنید.",
     errToken: "توکن نامعتبر است. فرمت: tmp_xxxxxx", errUnknown: "خطایی رخ داد.",
     errNoSession: "نشست فعالی برای این حساب نیست. ابتدا در ربات تلگرام یک ایمیل بسازید.",
     noEmail: "هنوز ایمیلی ندارید", noEmailText: "هنوز ایمیلی ندارید. با یک ضربه یکی بسازید.",
@@ -58,6 +61,9 @@ const STR = {
     statusCopied: "Copied ✓", statusRefreshed: "Refreshed ✓",
     statusCreated: "New email created ✓", statusRestored: "Email restored ✓",
     statusLang: "Language switched ✓", errNetwork: "Server connection error. Try again.",
+    errExpiredTg: "Telegram session expired. Close and reopen the Mini App.",
+    errForbiddenTg: "You do not have access to this bot.",
+    errInvalidTg: "Telegram authentication failed. Close and reopen the Mini App.",
     errToken: "Invalid token. Format: tmp_xxxxxx", errUnknown: "Something went wrong.",
     errNoSession: "No active session for this account. Create an email in the Telegram bot first.",
     noEmail: "No email yet", noEmailText: "No email yet. Create one with a single tap.",
@@ -221,10 +227,68 @@ function setToken(tok) {
 }
 
 /* ---------------- auth flows ---------------- */
-function showNoSession() {
+/* Standalone website: the browser auto-ensures an anonymous web session
+   (POST /api/v1/web/session) and lands directly on the dashboard — no
+   Telegram account, Login Widget, or token is ever required. The server
+   sets an HttpOnly cookie (the durable identity); the token in the reply
+   is additionally kept in memory/sessionStorage for the Authorization
+   header transport, exactly like Mini App session tokens. Nothing
+   sensitive goes to localStorage. The Mini App never stops on the entry
+   view: it authenticates with raw initData and lands on the dashboard
+   directly (empty state for first-time users). */
+async function ensureWebSession() {
+  status(t("statusLoading"), "loading");
+  const r = await api("/api/v1/web/session", { method: "POST" });
+  setToken(r.sessionToken);
+  S.me = r.user;
+  if (r.user && r.user.lang) { S.lang = r.user.lang; applyLang(); }
+  return r;
+}
+/* Mini App authentication with RAW initData (server verifies HMAC).
+   Shared by boot() and the refreshAll() 401-recovery below so a rejected
+   session token triggers exactly one silent re-auth instead of a dead end. */
+async function miniAuth() {
+  const r = await api("/api/v1/auth/telegram", {
+    method: "POST",
+    body: { initData: S.tg.initData },
+  });
+  setToken(r.sessionToken);
+  S.me = r.user;
+  if (r.user && r.user.lang) { S.lang = r.user.lang; applyLang(); }
+  return r;
+}
+/* Distinct Mini App failure messages. Previously every code except
+   no_session collapsed into errNetwork, hiding expired/forbidden cases. */
+function miniAuthError(e) {
+  if (!e) { status(t("errNetwork"), "error"); return; }
+  if (e.code === "no_session") {
+    // Legacy worker response; current backend issues pending instead.
+    showNoSession();
+    return;
+  }
+  if (e.code === "expired") status(t("errExpiredTg"), "error");
+  else if (e.code === "forbidden") status(t("errForbiddenTg"), "error");
+  else if (e.code === "invalid_init_data") status(t("errInvalidTg"), "error");
+  else status(t("errNetwork"), "error");
+  showEntry();
+  const lh = $("#login-help");
+  if (lh) lh.classList.remove("hidden");
+}
+function showEntry() {
+  // Secondary recovery view (explicit user choice only). The normal
+  // website flow never lands here on its own — boot() ensures a web
+  // session and shows the dashboard instead.
   show("view-login");
+}
+function showNoSession() {
+  // Legacy fallback (e.g. a cached worker that still returns no_session):
+  // surface the entry view with guidance toward the bot. With the current
+  // backend this path is not hit — first-time users get a pending session
+  // and land on the dashboard empty state instead.
+  showEntry();
   status(t("noSessionTitle") + " — " + t("noSessionText"), "error");
-  $("#login-help").classList.remove("hidden");
+  const lh = $("#login-help");
+  if (lh) lh.classList.remove("hidden");
   const botBtn = $("#btn-open-bot");
   if (botBtn) {
     if (BOT_URL && isHttpUrl(BOT_URL)) {
@@ -239,43 +303,43 @@ async function boot() {
   applyTheme(); applyLang();
   if (initTelegram()) {
     // Telegram Mini App: authenticate with RAW initData (server verifies HMAC).
+    // First-time users receive a pending session (no email yet) and land on
+    // the dashboard empty state — never on a recovery-token form.
+    // NOTE: this path must never use /api/v1/web/session (Telegram identity).
     status(t("statusLogin"), "loading");
     try {
-      const r = await api("/api/v1/auth/telegram", {
-        method: "POST",
-        body: { initData: S.tg.initData },
-      });
-      setToken(r.sessionToken);
-      S.me = r.user;
-      if (r.user && r.user.lang) { S.lang = r.user.lang; applyLang(); }
+      await miniAuth();
       await enterMain();
     } catch (e) {
-      if (e.code === "no_session") {
-        // Mini App without a prior bot session: the bot is the single
-        // authority that creates emails — guide the user there.
-        showNoSession();
-      } else {
-        status(t("errNetwork"), "error");
-        show("view-login");
-        $("#login-help").classList.remove("hidden");
-      }
+      miniAuthError(e);
     }
     return;
   }
-  // Plain browser: recovery-token login.
+  // Plain browser: standalone temp-mail flow. Returning visitors are
+  // recognised via the HttpOnly cookie (or stored token) and land on
+  // their dashboard; new visitors get a fresh anonymous web session and
+  // land on the dashboard empty state with a Create button. Telegram is
+  // never involved; recovery stays behind an explicit secondary toggle
+  // (reachable from the dashboard restore button).
   if (S.token) {
     status(t("statusLoading"), "loading");
     try {
       S.me = await api("/api/v1/me");
-      if (S.me.lang) { S.lang = S.me.lang; applyLang(); }
+      if (S.me && S.me.lang) { S.lang = S.me.lang; applyLang(); }
       await enterMain();
+      return;
     } catch (e) {
+      if (e.status !== 401) { status(t("errNetwork"), "error"); return; }
       setToken("");
       status("", "");
-      show("view-login");
     }
-  } else {
-    show("view-login");
+  }
+  try {
+    await ensureWebSession();
+    await enterMain();
+  } catch (e) {
+    status(t("errNetwork"), "error");
+    showEntry();
   }
 }
 async function loginWithToken(tok) {
@@ -308,9 +372,26 @@ async function refreshAll() {
     await loadInbox(true);
     status("", "");
   } catch (e) {
+    if (e.status === 401 && S.isTg && S.tg) {
+      // Mini App session token rejected after a successful auth (dashboard
+      // already shown): re-authenticate once with fresh initData instead of
+      // wiping the token into a dead end. The token is only cleared if the
+      // re-auth itself fails with unauthorized.
+      try {
+        await miniAuth();
+        S.me = await api("/api/v1/me");
+        renderMe();
+        await loadInbox(true);
+        status("", "");
+      } catch (e2) {
+        if (e2.status === 401) setToken("");
+        miniAuthError(e2);
+      }
+      return;
+    }
     if (e.status === 401) {
       setToken("");
-      if (S.isTg) { status(t("errNetwork"), "error"); } else show("view-login");
+      showEntry();
       return;
     }
     status(t("errNetwork"), "error");
@@ -493,10 +574,20 @@ document.addEventListener("DOMContentLoaded", () => {
   $("#btn-copy-otp").addEventListener("click", () => copyText($("#detail-otp").textContent));
   $("#btn-copy-body").addEventListener("click", () => copyText($("#detail-body").textContent));
   $("#btn-back").addEventListener("click", backToMain);
-  $("#btn-logout").addEventListener("click", () => {
+  $("#btn-logout").addEventListener("click", async () => {
+    // Web logout: ask the server to clear the HttpOnly cookie (JS cannot
+    // clear it), drop the in-memory/stored token, and start a fresh
+    // anonymous web session on the dashboard. The abandoned email stays
+    // recoverable via its recovery token (shown once at creation).
+    try { await api("/api/v1/web/logout", { method: "POST" }); } catch (_) {}
     setToken(""); S.me = null; S.inbox = [];
     clearInterval(S.refreshTimer);
-    show("view-login");
+    try {
+      await ensureWebSession();
+      await enterMain();
+    } catch (_) {
+      showEntry();
+    }
   });
   boot();
 });
