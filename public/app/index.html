@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
-  <meta name="theme-color" content="#0e1621" />
+  <meta name="theme-color" content="#0b0e13" />
   <meta name="description" content="Temporary Email — ایمیل موقت سریع و امن" />
   <title>TempMail — ایمیل موقت</title>
   <link rel="stylesheet" href="./styles.css" />
@@ -14,7 +14,7 @@
   <div id="app" class="app">
     <header class="topbar">
       <div class="brand">
-        <span class="brand-logo" aria-hidden="true">📮</span>
+        <span class="brand-dot" aria-hidden="true"></span>
         <span class="brand-name" data-i18n="brandName">تمپ‌میل</span>
       </div>
       <div class="topbar-actions">
@@ -27,10 +27,10 @@
       <!-- Global status line (loading / error) -->
       <div id="status" class="status hidden" role="status"></div>
 
-      <!-- ============ LOGIN (browser mode) ============ -->
+      <!-- ============ LOGIN (browser mode / no_session) ============ -->
       <section id="view-login" class="view hidden">
-        <div class="card hero">
-          <div class="hero-logo" aria-hidden="true">💎</div>
+        <div class="hero-mini">
+          <div class="hero-mini-mark" aria-hidden="true">✉️</div>
           <h1 data-i18n="loginTitle">ایمیل موقت شما</h1>
           <p class="muted" data-i18n="loginDesc">بدون ثبت‌نام، یک آدرس ایمیل موقت بسازید و کدهای تایید را فوری دریافت کنید.</p>
         </div>
@@ -49,17 +49,31 @@
 
       <!-- ============ MAIN (dashboard + inbox) ============ -->
       <section id="view-main" class="view hidden">
-        <div class="card email-card">
-          <div class="email-label" data-i18n="yourEmail">آدرس ایمیل شما</div>
-          <div class="email-row">
-            <code id="current-email" class="email-addr" dir="ltr">…</code>
+        <div class="card email-hero">
+          <div class="email-top">
+            <span class="email-label" data-i18n="yourEmail">آدرس ایمیل شما</span>
+            <span id="email-live" class="live-dot hidden" aria-hidden="true"></span>
           </div>
+          <code id="current-email" class="email-addr" dir="ltr">…</code>
           <div id="email-meta" class="meta muted"></div>
-          <div class="btn-grid">
-            <button id="btn-copy-email" class="btn secondary" type="button">📋 <span data-i18n="btnCopy">کپی</span></button>
-            <button id="btn-refresh" class="btn secondary" type="button">🔄 <span data-i18n="btnRefresh">به‌روزرسانی</span></button>
-            <button id="btn-new" class="btn primary" type="button">🎲 <span data-i18n="btnNew">ایمیل جدید</span></button>
-            <button id="btn-restore" class="btn ghost" type="button">♻️ <span data-i18n="btnRestore">بازگردانی</span></button>
+          <!-- Empty state: authenticated but no active email -->
+          <div id="no-email-box" class="no-email hidden">
+            <div class="no-email-icon" aria-hidden="true">📭</div>
+            <p class="no-email-text" data-i18n="noEmailText">هنوز ایمیلی ندارید. با یک ضربه یکی بسازید.</p>
+          </div>
+          <button id="btn-create-main" class="btn primary block cta" type="button">➕ <span data-i18n="btnCreate">ساخت ایمیل جدید</span></button>
+          <!-- Inline confirm (replaces native confirm dialog) -->
+          <div id="confirm-box" class="confirm-box hidden">
+            <p class="confirm-text" data-i18n="confirmNew">ایمیل فعلی و پیام‌هایش حذف می‌شوند. ایمیل جدید ساخته شود؟</p>
+            <div class="btn-row">
+              <button id="btn-confirm-yes" class="btn primary" type="button" data-i18n="btnConfirmYes">بله، بساز</button>
+              <button id="btn-confirm-no" class="btn ghost" type="button" data-i18n="btnCancel">انصراف</button>
+            </div>
+          </div>
+          <div class="action-row">
+            <button id="btn-copy-email" class="chip" type="button">📋 <span data-i18n="btnCopy">کپی</span></button>
+            <button id="btn-refresh" class="chip" type="button">🔄 <span data-i18n="btnRefresh">به‌روزرسانی</span></button>
+            <button id="btn-restore" class="chip" type="button">♻️ <span data-i18n="btnRestore">بازگردانی</span></button>
           </div>
           <div id="restore-box" class="restore-box hidden">
             <input id="input-restore" class="text-input mono" type="text" inputmode="latin"
@@ -77,13 +91,13 @@
         </div>
 
         <div class="inbox-head">
-          <h2>📥 <span data-i18n="inbox">صندوق ورودی</span> <span id="inbox-count" class="count-badge">0</span></h2>
+          <h2><span data-i18n="inbox">صندوق ورودی</span> <span id="inbox-count" class="count-badge">0</span></h2>
           <button id="btn-logout" class="link-btn" type="button" data-i18n="btnLogout">خروج</button>
         </div>
         <div id="inbox-list" class="inbox-list"></div>
-        <div id="inbox-empty" class="card empty hidden">
-          <div class="empty-icon" aria-hidden="true">📭</div>
-          <p data-i18n="inboxEmpty">صندوق ورودی خالی است</p>
+        <div id="inbox-empty" class="empty hidden">
+          <div class="empty-icon" aria-hidden="true">📥</div>
+          <p class="empty-title" data-i18n="inboxEmpty">صندوق ورودی خالی است</p>
           <p class="hint" data-i18n="inboxEmptyHint">ایمیل‌های دریافتی این آدرس اینجا نمایش داده می‌شوند.</p>
         </div>
       </section>

@@ -18,7 +18,8 @@ const STR = {
     btnLogin: "ورود با توکن", or: "یا", btnNoToken: "هنوز ایمیلی ندارم — راهنما",
     loginHelpText: "در ربات تلگرام دکمه «ساخت ایمیل جدید» را بزنید؛ توکن نمایش داده می‌شود. اگر از داخل تلگرام این صفحه را باز کرده‌اید، ورود خودکار انجام می‌شود.",
     yourEmail: "آدرس ایمیل شما", btnCopy: "کپی", btnRefresh: "به‌روزرسانی",
-    btnNew: "ایمیل جدید", btnRestore: "بازگردانی", btnDoRestore: "بازیابی", btnCancel: "انصراف",
+    btnCreate: "ساخت ایمیل جدید", btnRestore: "بازگردانی", btnDoRestore: "بازیابی", btnCancel: "انصراف",
+    btnConfirmYes: "بله، بساز",
     newTokenLabel: "توکن ایمیل جدید — آن را نگه دارید:", inbox: "صندوق ورودی",
     btnLogout: "خروج", inboxEmpty: "صندوق ورودی خالی است",
     inboxEmptyHint: "ایمیل‌های دریافتی این آدرس اینجا نمایش داده می‌شوند.",
@@ -31,7 +32,8 @@ const STR = {
     statusLang: "زبان تغییر کرد ✓", errNetwork: "خطای ارتباط با سرور. دوباره تلاش کنید.",
     errToken: "توکن نامعتبر است. فرمت: tmp_xxxxxx", errUnknown: "خطایی رخ داد.",
     errNoSession: "نشست فعالی برای این حساب نیست. ابتدا در ربات تلگرام یک ایمیل بسازید.",
-    noEmail: "هنوز ایمیلی ندارید", activeReady: "فعال و آماده دریافت", createdAt: "ساخته شده:",
+    noEmail: "هنوز ایمیلی ندارید", noEmailText: "هنوز ایمیلی ندارید. با یک ضربه یکی بسازید.",
+    activeReady: "فعال و آماده دریافت", createdAt: "ساخته شده:",
     openLink: "باز کردن لینک", copied: "کپی شد",
     noSessionTitle: "حسابی پیدا نشد",
     noSessionText: "ابتدا در ربات یک ایمیل بسازید، بعد به اینجا بازگردید.",
@@ -44,7 +46,8 @@ const STR = {
     btnLogin: "Login with token", or: "or", btnNoToken: "No email yet — help",
     loginHelpText: "In the Telegram bot tap “Generate New Email”; a token is shown. If you opened this page inside Telegram, login is automatic.",
     yourEmail: "Your email address", btnCopy: "Copy", btnRefresh: "Refresh",
-    btnNew: "New email", btnRestore: "Restore", btnDoRestore: "Restore", btnCancel: "Cancel",
+    btnCreate: "Create new email", btnRestore: "Restore", btnDoRestore: "Restore", btnCancel: "Cancel",
+    btnConfirmYes: "Yes, create",
     newTokenLabel: "New email token — keep it safe:", inbox: "Inbox",
     btnLogout: "Logout", inboxEmpty: "Inbox is empty",
     inboxEmptyHint: "Incoming mail for this address will appear here.",
@@ -57,7 +60,8 @@ const STR = {
     statusLang: "Language switched ✓", errNetwork: "Server connection error. Try again.",
     errToken: "Invalid token. Format: tmp_xxxxxx", errUnknown: "Something went wrong.",
     errNoSession: "No active session for this account. Create an email in the Telegram bot first.",
-    noEmail: "No email yet", activeReady: "Active and ready", createdAt: "Created:",
+    noEmail: "No email yet", noEmailText: "No email yet. Create one with a single tap.",
+    activeReady: "Active and ready", createdAt: "Created:",
     openLink: "Open link", copied: "Copied",
     noSessionTitle: "No account found",
     noSessionText: "Create an email in the bot first, then come back here.",
@@ -315,15 +319,18 @@ async function refreshAll() {
 function renderMe() {
   const em = $("#current-email");
   const meta = $("#email-meta");
-  em.textContent = "";
+  const live = $("#email-live");
+  const noBox = $("#no-email-box");
+  const has = !!(S.me && S.me.email);
+  em.textContent = has ? S.me.email : t("noEmail");
+  em.classList.toggle("hidden", !has);
+  if (noBox) noBox.classList.toggle("hidden", has);
+  if (live) live.classList.toggle("hidden", !has);
   meta.textContent = "";
-  if (S.me && S.me.email) {
-    em.textContent = S.me.email;
-    meta.textContent = "🟢 " + t("activeReady") + (S.me.createdAt ? " · " + t("createdAt") + " " + S.me.createdAt : "");
-  } else {
-    em.textContent = t("noEmail");
-    meta.textContent = "";
+  if (has) {
+    meta.textContent = t("activeReady") + (S.me.createdAt ? " · " + t("createdAt") + " " + S.me.createdAt : "");
   }
+  hideConfirm();
 }
 async function loadInbox(silent) {
   let items = [];
@@ -406,8 +413,23 @@ function renderDetail(d) {
 function backToMain() { show("view-main"); }
 
 /* ---------------- actions ---------------- */
+function hideConfirm() {
+  const c = $("#confirm-box");
+  if (c) c.classList.add("hidden");
+}
+function askCreate() {
+  // Inline two-step confirm (replaces the native confirm dialog):
+  // with an active email ask first, without one create immediately.
+  $("#new-token-box").classList.add("hidden");
+  if (S.me && S.me.email) {
+    $("#restore-box").classList.add("hidden");
+    $("#confirm-box").classList.remove("hidden");
+  } else {
+    doCreate();
+  }
+}
 async function doCreate() {
-  if (!confirm(t("confirmNew"))) return;
+  hideConfirm();
   status(t("statusLoading"), "loading");
   try {
     const r = await api("/api/v1/emails", { method: "POST" });
@@ -458,7 +480,9 @@ document.addEventListener("DOMContentLoaded", () => {
   $("#btn-login-help").addEventListener("click", () => $("#login-help").classList.toggle("hidden"));
   $("#btn-copy-email").addEventListener("click", () => { if (S.me && S.me.email) copyText(S.me.email); });
   $("#btn-refresh").addEventListener("click", refreshAll);
-  $("#btn-new").addEventListener("click", doCreate);
+  $("#btn-create-main").addEventListener("click", askCreate);
+  $("#btn-confirm-yes").addEventListener("click", doCreate);
+  $("#btn-confirm-no").addEventListener("click", hideConfirm);
   $("#btn-restore").addEventListener("click", () => {
     $("#new-token-box").classList.add("hidden");
     $("#restore-box").classList.toggle("hidden");
