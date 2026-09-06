@@ -7,7 +7,7 @@ const root = join(__dirname, "..");
 const workerSrc = readFileSync(join(root, "_worker.js"), "utf8");
 
 const harness = `
-export { parseEmailBody, stripCssArtifacts, stripCssBlocks, looksLikeCssSelector, looksLikeCssLine, lastSelectorTokenEnd, cleanText, stripHtmlTags, generateRecoveryToken, isValidRecoveryToken, RECOVERY_TOKEN_REGEX, RECOVERY_TOKEN_ALPHABET, lastResortExtract };
+export { parseEmailBody, stripCssArtifacts, stripCssBlocks, looksLikeCssSelector, looksLikeCssLine, lastSelectorTokenEnd, cleanText, stripHtmlTags, generateRecoveryToken, isValidRecoveryToken, RECOVERY_TOKEN_REGEX, RECOVERY_TOKEN_ALPHABET, lastResortExtract, getDashboardPayload, MINI_APP_URL, i18n };
 `;
 const tmp = join(root, ".worker_test.mjs");
 writeFileSync(tmp, workerSrc + harness);
@@ -319,6 +319,33 @@ check("aparat: asset CSS link filtered out",
   !aparatParsed.links.some(l => l.includes("/assets/web/ui")));
 check("aparat: instagram social link filtered out",
   !aparatParsed.links.some(l => l.includes("instagram.com")));
+
+// 18. Mini App entry points: dashboard web_app button + menu-button route.
+//     /start renders the dashboard (handleMessage has no command parsing),
+//     so the dashboard button IS the /start button.
+check("miniapp: exact URL constant", mod.MINI_APP_URL === "https://twenyonerrf.ir/app/");
+check("miniapp: fa btnMiniApp present", faBlock.includes("btnMiniApp: \"📱 ورود به مینی‌اپ\""));
+check("miniapp: en btnMiniApp present", enBlock.includes("btnMiniApp: \"📱 Open Mini App\""));
+check("miniapp: web_app button in dashboard keyboard",
+  workerSrc.includes("text: t.btnMiniApp, web_app: { url: MINI_APP_URL }"));
+const dashFa = mod.getDashboardPayload({ email: "u@twenyonerrf.ir", createdAt: "c", recoveryToken: "tmp_aaaa11" }, "fa");
+const dashEn = mod.getDashboardPayload(null, "en");
+const firstRowFa = dashFa.keyboard.inline_keyboard[0][0];
+const firstRowEn = dashEn.keyboard.inline_keyboard[0][0];
+check("miniapp: dashboard first row is web_app button (fa, with email)",
+  firstRowFa && firstRowFa.web_app && firstRowFa.web_app.url === "https://twenyonerrf.ir/app/" &&
+  firstRowFa.text === mod.i18n.fa.btnMiniApp && !("callback_data" in firstRowFa));
+check("miniapp: dashboard first row is web_app button (en, no email)",
+  firstRowEn && firstRowEn.web_app && firstRowEn.web_app.url === "https://twenyonerrf.ir/app/" &&
+  firstRowEn.text === mod.i18n.en.btnMiniApp);
+check("miniapp: old buttons still present after insert",
+  JSON.stringify(dashFa.keyboard).includes('"callback_data":"generate"') &&
+  JSON.stringify(dashFa.keyboard).includes('"callback_data":"inbox"') &&
+  JSON.stringify(dashFa.keyboard).includes('"callback_data":"help"'));
+check("miniapp: set-menu-button route exists", workerSrc.includes('url.pathname === "/set-menu-button"'));
+check("miniapp: menu button uses setChatMenuButton web_app",
+  workerSrc.includes("setChatMenuButton") && workerSrc.includes('type: "web_app"') &&
+  workerSrc.includes("web_app: { url: MINI_APP_URL }"));
 
 console.log(failures === 0 ? "\nALL TESTS PASSED" : `\n${failures} TEST(S) FAILED`);
 process.exit(failures === 0 ? 0 : 1);

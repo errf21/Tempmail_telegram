@@ -61,6 +61,7 @@ const i18n = {
     restoreInvalid: "❌ فرمت توکن نامعتبر است. توکن باید به شکل <code>tmp_xxxxxx</code> باشد.",
     restoreWrongOwner: "❌ این توکن متعلق به حساب شما نیست.",
     btnHelp: "ℹ️ راهنما",
+    btnMiniApp: "📱 ورود به مینی‌اپ",
     btnClose: "❌ بستن",
     helpTitle: "ℹ️ <b>راهنمای استفاده از ربات</b>",
     helpIntro: "این ربات یک آدرس ایمیل موقت برای شما می‌سازد تا بتوانید بدون استفاده از ایمیل اصلی خود، در سایت‌ها ثبت‌نام کنید یا کدهای تایید را دریافت نمایید.",
@@ -145,6 +146,7 @@ const i18n = {
     restoreInvalid: "❌ Invalid token format. Token must look like <code>tmp_xxxxxx</code>.",
     restoreWrongOwner: "❌ This token does not belong to your account.",
     btnHelp: "ℹ️ Help",
+    btnMiniApp: "📱 Open Mini App",
     btnClose: "❌ Close",
     helpTitle: "ℹ️ <b>How to use this bot</b>",
     helpIntro: "This bot creates a temporary email address for you so you can sign up on websites or receive verification codes without exposing your real inbox.",
@@ -710,6 +712,30 @@ export default {
       }
       const webhookUrl = `${url.origin}/webhook`;
       const tgRes = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/setWebhook?url=${encodeURIComponent(webhookUrl)}`);
+      const data = await tgRes.json();
+      return new Response(JSON.stringify(data, null, 2), {
+        headers: { "Content-Type": "application/json; charset=utf-8" }
+      });
+    }
+
+    // One-time (idempotent) setup: pin the permanent chat Menu Button
+    // ("📱 ورود به مینی‌اپ") that opens the Mini App URL above.
+    // Same pattern/security as /set-webhook: server-side BOT_TOKEN only.
+    if (request.method === "GET" && url.pathname === "/set-menu-button") {
+      if (!env.BOT_TOKEN || env.BOT_TOKEN === "YOUR_TELEGRAM_BOT_TOKEN") {
+        return new Response("Error: BOT_TOKEN is not configured.", { status: 400 });
+      }
+      const tgRes = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/setChatMenuButton`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          menu_button: {
+            type: "web_app",
+            text: i18n.fa.btnMiniApp,
+            web_app: { url: MINI_APP_URL }
+          }
+        })
+      });
       const data = await tgRes.json();
       return new Response(JSON.stringify(data, null, 2), {
         headers: { "Content-Type": "application/json; charset=utf-8" }
@@ -1499,10 +1525,15 @@ async function handleCallbackQuery(callbackQuery, env) {
    UI Components & Formatting
    ========================================================================== */
 
+// Canonical Telegram Mini App URL, opened via the standard Telegram
+// Web App button (dashboard inline keyboard + chat Menu Button).
+// NOTE: this is intentionally a fixed HTTPS URL, NOT derived from
+// env.DOMAIN (which is the mail-receiving domain).
+const MINI_APP_URL = "https://twenyonerrf.ir/app/";
+
 function getDashboardPayload(userData, lang = "fa") {
   const t = i18n[lang] || i18n.fa;
   let text = "";
-
   if (userData && userData.email) {
     text =
       `${t.botTitle}\n` +
@@ -1530,6 +1561,7 @@ function getDashboardPayload(userData, lang = "fa") {
 
   const keyboard = {
     inline_keyboard: [
+      [{ text: t.btnMiniApp, web_app: { url: MINI_APP_URL } }],
       [{ text: t.btnGenerate, callback_data: "generate" }],
       [
         { text: t.btnInbox, callback_data: "inbox" },
